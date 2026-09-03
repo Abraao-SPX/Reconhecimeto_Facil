@@ -56,7 +56,7 @@ sequenceDiagram
         API->>Core: 1. Validação de Reflexo Espectral (Delta RGB na pele)
         API->>Core: 2. Seleção do melhor frame nítido (Laplaciano)
         API->>Core: 3. Detecção com YuNet e Alinhamento por 5 Marcos
-        API->>Core: 4. Comparação SFace (Distância <= 0.30)
+        API->>Core: 4. Comparação SFace (Distância <= 0.35)
     end
 
     API-->>App: Resultado (Aprovado/Reprovado) + Distância + Token JWT
@@ -138,8 +138,8 @@ A comparação facial usa o modelo **SFace** com distância de cosseno:
 
 | Distância Obtida | Status | O que representa |
 | :--- | :---: | :--- |
-| **`0.00` a `0.30`** | **APROVADO ✅** | Rosto real idêntico ao titular cadastrado *(testes reais pontuaram `0.27`)*. |
-| **`Acima de 0.30`** | **REPROVADO ❌** | Rosto incompatível, foto na parede, tela de outro celular *(pontuam `0.58`+)*. |
+| **`0.00` a `0.35`** | **APROVADO ✅** | Rosto real idêntico ao titular cadastrado *(testes reais pontuaram `0.27` a `0.29`)*. |
+| **`Acima de 0.35`** | **REPROVADO ❌** | Rosto incompatível, foto na parede, tela de outro celular *(pontuam `0.58`+)*. |
 
 ---
 
@@ -201,7 +201,7 @@ curl -X POST http://localhost:8000/verify \
   "verified": true,
   "is_live": true,
   "distance": 0.2707,
-  "threshold": 0.30,
+  "threshold": 0.35,
   "jwt_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "status": "Identidade confirmada com sucesso!"
 }

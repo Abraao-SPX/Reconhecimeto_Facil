@@ -575,11 +575,11 @@ async def verify_identity(
                 cv2.imwrite(os.path.join(DEBUG_DIR, "last_aligned_profile.jpg"), aligned_profile)
 
                 similarity = float(recognizer_sface.match(feat_probe, feat_profile, cv2.FaceRecognizerSF_FR_COSINE))
-                # Limiar rigoroso anti-fraude definido para 0.30:
-                # distance <= 0.30 -> Aprovado (Apenas correspondência idêntica com alta certeza)
-                # distance > 0.30 -> Reprovado (Rejeita fotos de terceiros, fotos na parede ou telas)
+                # Limiar rigoroso anti-fraude calibrado para 0.35:
+                # distance <= 0.35 -> Aprovado (Garante aprovação confiável da pessoa real mesmo com pequenas variações de expressão/luz)
+                # distance > 0.35 -> Reprovado (Rejeita fotos de terceiros, fotos na parede [que pontuam 0.58] ou telas)
                 distance = max(0.0, 1.0 - similarity)
-                threshold = 0.30
+                threshold = 0.35
                 verified = distance <= threshold
 
         # Fallback para ArcFace caso YuNet/SFace não tenham sido conclusivos
@@ -595,7 +595,7 @@ async def verify_identity(
                     enforce_detection=False
                 )
                 distance = float(resultado.get("distance", 1.0))
-                threshold = 0.30
+                threshold = 0.35
                 verified = distance <= threshold
             except Exception as ve:
                 erro_str = str(ve).lower()
