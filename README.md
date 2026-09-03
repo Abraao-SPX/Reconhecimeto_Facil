@@ -6,7 +6,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.11+-5C3EE8?logo=opencv)](https://opencv.org/)
 [![Expo](https://img.shields.io/badge/React%20Native-Expo%20SDK%2054-000020?logo=expo)](https://expo.dev/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 ---
 
@@ -287,4 +287,4 @@ Este projeto integra tecnologias de ponta desenvolvidas pela comunidade global d
 
 ## 📄 Licença
 
-Distribuído sob a licença **MIT** por **Abraão Paixão**. Consulte o arquivo [`LICENSE`](LICENSE) para mais informações. Livre para uso pessoal, acadêmico e comercial.
+Distribuído sob a licença **Apache 2.0** por **Abraão Paixão**. Consulte o arquivo [`LICENSE`](LICENSE) para mais informações. Permite uso pessoal, acadêmico, comercial, modificações e confere proteção mútua de patentes.
