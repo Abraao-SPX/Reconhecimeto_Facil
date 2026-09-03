@@ -13,7 +13,7 @@ import {
   ScrollView,
   Switch,
 } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import * as Brightness from 'expo-brightness';
 import * as ImagePicker from 'expo-image-picker';
 import * as Speech from 'expo-speech';
@@ -21,8 +21,8 @@ import * as Haptics from 'expo-haptics';
 import axios from 'axios';
 import { StatusBar } from 'expo-status-bar';
 
-// Endereço IP padrão: suporta variável de ambiente EXPO_PUBLIC_API_URL ou fallback
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.15:8000';
+// Endereço IP padrão: configurado com o IP real da sua máquina (192.168.1.44)
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.44:8000';
 
 type ScreenState = 'START' | 'LIVENESS' | 'PROCESSING' | 'SUCCESS' | 'FAILURE';
 
@@ -90,6 +90,7 @@ async function executeWithRetry<T>(
 export default function App() {
   const [screenState, setScreenState] = useState<ScreenState>('START');
   const [permission, requestPermission] = useCameraPermissions();
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
   const [profileImageUri, setProfileImageUri] = useState<string | null>(null);
   const [backgroundColor, setBackgroundColor] = useState('#000000');
   const [statusMessage, setStatusMessage] = useState('');
@@ -106,12 +107,15 @@ export default function App() {
 
   const cameraRef = useRef<CameraView>(null);
 
-  // Solicita permissão ao carregar se não tiver
+  // Solicita permissões de câmera e áudio ao carregar se não tiver
   useEffect(() => {
     if (!permission?.granted) {
       requestPermission();
     }
-  }, [permission]);
+    if (!micPermission?.granted) {
+      requestMicPermission();
+    }
+  }, [permission, micPermission]);
 
   // Escolhe a foto de referência (foto do perfil/documento)
   const pickProfilePhoto = async () => {
@@ -137,7 +141,7 @@ export default function App() {
       if (res.data?.status === 'ok') {
         Alert.alert(
           'Servidor Online! ✅',
-          `Conexão bem-sucedida com o backend.\nModelo: ${res.data.model || 'ArcFace'}\nServiço: ${res.data.service || 'BeyondTime'}`
+          `Conexão bem-sucedida com o backend.\nModelo: ${res.data.model || 'YuNet-SFace'}\nServiço: ${res.data.service || 'Reconhecimento Fácil'}`
         );
       } else {
         Alert.alert('Aviso ⚠️', 'O servidor respondeu com formato inesperado.');
@@ -185,7 +189,7 @@ export default function App() {
     const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
       setStatusMessage('Buscando sequência com o servidor...');
-      speakInstruction('Posicione seu rosto na moldura e olhe para a tela.', voiceAssistance);
+      speakInstruction('Aproxime o celular do rosto e olhe para a tela.', voiceAssistance);
 
       // 1. Obtém desafio dinâmico da API com retry automático contra instabilidade
       const res = await executeWithRetry(
@@ -207,8 +211,11 @@ export default function App() {
       setStatusMessage('Fique olhando para a tela...');
       triggerHapticFeedback('impact');
 
-      // 3. Inicia gravação de vídeo
-      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 5 });
+      // 3. Garante permissão de gravação e inicia vídeo mudo (sem necessidade de áudio)
+      if (!micPermission?.granted) {
+        await requestMicPermission();
+      }
+      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 5, mute: true });
 
       // Frame inicial neutro escuro (300ms)
       setBackgroundColor('#000000');
@@ -339,8 +346,8 @@ export default function App() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={styles.header}>
-            <Text style={styles.appTitle}>BEYONDTIME</Text>
-            <Text style={styles.appSubtitle}>Verificação Facial Anti-Golpe</Text>
+            <Text style={styles.appTitle}>RECONHECIMENTO FÁCIL</Text>
+            <Text style={styles.appSubtitle}>Biometria & Prova de Vida Inteligente</Text>
           </View>
 
           <View style={styles.startCard}>
@@ -402,9 +409,9 @@ export default function App() {
                 <View style={styles.presetsContainer}>
                   <TouchableOpacity
                     style={styles.presetButton}
-                    onPress={() => setApiUrl('http://192.168.1.15:8000')}
+                    onPress={() => setApiUrl('http://192.168.1.44:8000')}
                   >
-                    <Text style={styles.presetButtonText}>Wi-Fi (192.168.1.15)</Text>
+                    <Text style={styles.presetButtonText}>Wi-Fi (192.168.1.44)</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.presetButton}
@@ -482,6 +489,15 @@ export default function App() {
             facing="front"
             mode="video"
           />
+          {backgroundColor !== '#000000' && (
+            <View
+              style={[
+                StyleSheet.absoluteFillObject,
+                { backgroundColor, opacity: 0.38 },
+              ]}
+              pointerEvents="none"
+            />
+          )}
         </View>
 
         <Text style={styles.livenessTip}>Mantenha o rosto parado na moldura</Text>
@@ -523,11 +539,6 @@ export default function App() {
           <View style={styles.resultDetailsCard}>
             <Text style={styles.detailItem}>✅ Prova de Vida por Luz: Aprovada</Text>
             <Text style={styles.detailItem}>✅ Rosto Compatível com Cadastro</Text>
-            {verificationData?.badge && (
-              <Text style={[styles.detailItem, { color: '#FCD34D' }]}>
-                🏅 Selo: {verificationData.badge}
-              </Text>
-            )}
             {verificationData?.distance !== undefined && (
               <Text style={styles.distanceText}>
                 Distância Biométrica: {verificationData.distance} (Limite: {verificationData.threshold})

@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "BeyondTime Liveness",
-    "slug": "beyondtime-liveness",
+    "name": "Reconhecimento Fácil",
+    "slug": "reconhecimento-facil",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -10,7 +10,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "O BeyondTime precisa da câmera para verificar sua identidade com segurança e evitar perfis falsos."
+          "cameraPermission": "O aplicativo precisa da câmera para verificar sua identidade com segurança e evitar fraudes.",
+          "microphonePermission": "Permite acesso ao sensor de vídeo durante a prova de vida."
         }
       ],
       [

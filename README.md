@@ -1,225 +1,278 @@
-# 🛡️ BeyondTime - Sistema de Prova de Vida por Flash de Cores & Reconhecimento Facial 1:1
+# 🛡️ Reconhecimento Fácil
 
-Solução 100% **open-source**, **gratuita** e **autocontida** para autenticação biométrica e prevenção contra estelionato amoroso/perfis falsos em aplicativos de relacionamento, especialmente desenhada para a **terceira idade** (sem exigir movimentos complexos de cabeça ou expressões forçadas).
+> **Microsserviço Universal Open-Source de Prova de Vida Ativa (Anti-Spoofing Espectral) e Reconhecimento Facial 1:1 com IA (YuNet + SFace).**
 
----
-
-## 📌 Índice
-1. [Como Funciona a Tecnologia](#-como-funciona-a-tecnologia)
-   - [1.1. Prova de Vida Ativa por Reflexo de Luz (Flash Challenge-Response)](#11-prova-de-vida-ativa-por-reflexo-de-luz-flash-challenge-response)
-   - [1.2. Reconhecimento de Pontos e Linhas Faciais (ArcFace)](#12-reconhecimento-de-pontos-e-linhas-faciais-arcface)
-2. [Arquitetura e Fluxo do Sistema](#-arquitetura-e-fluxo-do-sistema)
-3. [Estrutura de Arquivos](#-estrutura-de-arquivos)
-4. [Pré-requisitos de Instalação](#-pré-requisitos-de-instalação)
-5. [Guia Passo a Passo de Execução](#-guia-passo-a-passo-de-execução)
-   - [Passo 1: Subir o Servidor Backend (Docker)](#passo-1-subir-o-servidor-backend-docker)
-   - [Passo 2: Rodar o Aplicativo Mobile (React Native / Expo)](#passo-2-rodar-o-aplicativo-mobile-react-native--expo)
-6. [O que Já Está Implementado vs. Calibragens Futuras](#-o-que-já-está-implementado-vs-calibragens-futuras)
-7. [Licença](#-licença)
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://www.docker.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.11+-5C3EE8?logo=opencv)](https://opencv.org/)
+[![Expo](https://img.shields.io/badge/React%20Native-Expo%20SDK%2054-000020?logo=expo)](https://expo.dev/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
-## 🔬 Como Funciona a Tecnologia
+## 📌 Visão Geral
 
-### 1.1. Prova de Vida Ativa por Reflexo de Luz (Flash Challenge-Response)
-Similar à tecnologia utilizada por grandes bancos e fintechs (ex: Mercado Pago, FaceTec):
-1. O backend sorteia uma sequência aleatória de 3 cores (exemplo: `VERMELHO, AZUL, VERDE`) e envia para o aplicativo com um token de sessão.
-2. O aplicativo abre a câmera frontal com uma moldura oval amigável para o idoso, eleva o brilho da tela para 100% e projeta as cores em tela cheia por 750ms cada, gravando o reflexo no rosto em vídeo.
-3. O backend analisa o ganho relativo ($\Delta$) de cada canal espectral (R, G, B) em relação ao frame inicial escuro (baseline):
-   $$\Delta R = \frac{R_t - R_0}{R_0}, \quad \Delta G = \frac{G_t - G_0}{G_0}, \quad \Delta B = \frac{B_t - B_0}{B_0}$$
-4. **Por que impede golpistas?**
-   - **Vídeos da internet e fotos impressas:** Não possuem como adivinhar a ordem das cores sorteadas em tempo real.
-   - **Telas de celulares/tablets:** Apresentam distorção moiré, vidro reflexivo plano e reflexos especulares anômalos.
-   - **Pele humana real:** A pele possui relevo tridimensional (curvatura do nariz, maçãs do rosto e testa) que absorve e dispersa a luz difusamente.
+O **Reconhecimento Fácil** é uma solução completa, leve e agnóstica de plataforma desenvolvida para autenticação biométrica facial e combate a fraudes de identidade (anti-spoofing). 
 
-### 1.2. Reconhecimento de Pontos e Linhas Faciais (ArcFace)
-O sistema utiliza a rede neural **ArcFace** (Additive Angular Margin Loss), uma das mais precisas do estado da arte em visão computacional open-source:
-1. **Detecção de Marcos Anatômicos (Landmarks):** Localiza os pontos-chave da face (cantos dos olhos, ponta do nariz e extremidades dos lábios).
-2. **Alinhamento Afim Digital:** Corrige inclinações de cabeça, centralizando a face matematicamente.
-3. **Extração de Vetor de Características (Embeddings):** Transforma as linhas, relevos e proporções do rosto em um vetor numérico de **512 dimensões**.
-4. **Comparação por Distância de Cosseno:** Compara o vetor do vídeo vivo com o vetor da foto de cadastro. Se a distância for menor que o limiar (`threshold = 0.68`), a identidade é confirmada com altíssima precisão.
+Ele combina:
+1. **Prova de Vida Ativa por Flash Espectral (Desafio-Resposta):** A tela do dispositivo pisca uma sequência de cores aleatórias enquanto filma o usuário. O backend analisa fisicamente a reflexão de luz ($\Delta$ RGB) na pele do rosto, tornando impossível fraudar o sistema com fotos impressas, telas de outros celulares ou máscaras estáticas.
+2. **Reconhecimento Facial 1:1 com Redes Neurais (YuNet + SFace):** Detecta 5 marcos anatômicos faciais (olhos, nariz e cantos da boca), alinha o rosto matematicamente em 112x112 pixels e compara com a foto de perfil cadastrada em apenas **5 milissegundos**.
+3. **Segurança Criptográfica & Rate Limiting:** Emite **Token JWT assinado (HS256)** para atestar a aprovação biométrica ao seu backend principal e protege contra ataques de força bruta.
 
 ---
 
-## 📐 Arquitetura e Fluxo do Sistema
+## 🌐 Onde ele funciona? (Compatibilidade Universal)
 
-```text
-[ Aplicativo Mobile (Expo) ]                      [ Servidor Backend (FastAPI + Docker) ]
-            |                                                        |
-            |------------ 1. GET /challenge ------------------------>|
-            |                                                        | Sorteia sequência de cores
-            |<----------- 2. Cores: ['VERMELHO', 'AZUL', 'VERDE'] ---| (Token temporário)
-            |                                                        |
-  [Ajusta Brilho: 100%]                                              |
-  [Filma rosto com Flash das Cores]                                  |
-  [Restaura Brilho original]                                         |
-            |                                                        |
-            |------------ 3. POST /verify (Vídeo + Foto Perfil) ---->|
-            |                                                        | 4. OpenCV: Valida picos de luz espectral
-            |                                                        | 5. ArcFace: Extrai 512 embeddings e compara
-            |<----------- 6. Retorna { verified: true/false } -------|
+O backend do **Reconhecimento Fácil** foi projetado como uma **API REST Universal (HTTP/JSON + Multipart)**. Ele é 100% desacoplado e funciona integrado a qualquer cliente:
+
+| Plataforma | Suporte | Tecnologias Típicas |
+| :--- | :---: | :--- |
+| 📱 **React Native / Expo** | ✅ Nativo | Exemplo completo funcional incluso na pasta `/mobile` (Expo SDK 54). |
+| 💙 **Flutter** | ✅ Suportado | Pacotes `camera` e `http` / `dio` (veja exemplo abaixo). |
+| 🌐 **Web (Browsers)** | ✅ Suportado | React, Next.js, Vue, Angular, HTML5 (`getUserMedia` + Canvas). |
+| 🤖 **Android Nativo** | ✅ Suportado | Kotlin / Java com CameraX e Retrofit. |
+| 🍏 **iOS Nativo** | ✅ Suportado | Swift com AVFoundation e URLSession. |
+| ☕ **Backends de Negócio** | ✅ Suportado | Spring Boot (Java), Node.js, NestJS, Django, Go, PHP, etc. |
+
+---
+
+## 📐 Arquitetura do Sistema
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Usuário / Cliente
+    participant App as App Mobile / Web (React Native, Flutter, etc.)
+    participant API as Backend Reconhecimento Fácil (Docker / FastAPI)
+    participant Core as Motor IA (YuNet + SFace)
+    participant Back as Seu Backend de Negócio (Spring Boot, Node, etc.)
+
+    App->>API: GET /challenge
+    API-->>App: Cores aleatórias (ex: VERMELHO, AZUL, VERDE) + Token
+    App->>U: Pisca cores na tela e grava vídeo do reflexo (3s)
+    App->>API: POST /verify (Vídeo gravado + Foto do Perfil)
+    
+    rect rgb(240, 245, 255)
+        API->>Core: 1. Validação de Reflexo Espectral (Delta RGB na pele)
+        API->>Core: 2. Seleção do melhor frame nítido (Laplaciano)
+        API->>Core: 3. Detecção com YuNet e Alinhamento por 5 Marcos
+        API->>Core: 4. Comparação SFace (Distância <= 0.30)
+    end
+
+    API-->>App: Resultado (Aprovado/Reprovado) + Distância + Token JWT
+    App->>Back: Envia Token JWT biométrico para autorizar login / cadastro
+    Back->>API: GET /verify/token/validate?token=...
+    API-->>Back: Token válido (Assinatura HMAC-SHA256 íntegra)
 ```
 
 ---
 
-## 🗂️ Estrutura de Arquivos
+## ⚙️ Pré-requisitos
 
-```text
-Reconchecimento_facil/
-├── README.md                   # Documentação completa e guia de execução
-├── backend/
-│   ├── Dockerfile              # Imagem Docker com dependências C++, OpenCV e download do ArcFace
-│   ├── docker-compose.yml      # Orquestração do container do serviço
-│   ├── requirements.txt        # Dependências Python com versões travadas (FastAPI, OpenCV, DeepFace)
-│   ├── main.py                 # API REST com rotas /challenge, /verify e algoritmo Delta RGB
-│   └── test_liveness.py        # Teste unitário com geração sintética de vídeo
-└── mobile/
-    ├── package.json            # Dependências React Native / Expo
-    ├── app.json                # Permissões de Câmera, Áudio e Brilho
-    ├── tsconfig.json           # Configurações TypeScript
-    ├── index.ts                # Ponto de entrada do Expo
-    └── App.tsx                 # Interface sênior acessível (START, LIVENESS, SUCESSO/FALHA)
-```
+Para rodar o projeto você precisa apenas de:
+* **Docker** e **Docker Compose** instalados (método recomendado para o backend).
+* **Node.js 18+** (apenas se for rodar o aplicativo de teste em React Native).
+* Um celular Android ou iOS conectado na mesma rede Wi-Fi do computador.
 
 ---
 
-## 📋 Pré-requisitos de Instalação
+## 🚀 Como Executar o Projeto
 
-Antes de começar, verifique se você tem instalado no seu computador:
+### 1️⃣ Subindo o Backend (API em Docker)
 
-1. **Docker & Docker Compose:**
-   - Instalação no Linux: `sudo apt-get install docker.io docker-compose-v2`
-   - Certifique-se de que o daemon do Docker está rodando: `docker ps`
-2. **Node.js (versão 18 ou superior) & npm:**
-   - Verifique com: `node -v` e `npm -v`
-3. **Expo Go no Smartphone:**
-   - Instale o app **Expo Go** no seu smartphone (disponível na Google Play Store e Apple App Store).
-   - O computador e o smartphone devem estar conectados na **mesma rede Wi-Fi**.
-
----
-
-## 🚀 Guia Passo a Passo de Execução
-
-### Passo 1: Subir o Servidor Backend (Docker)
-
-1. Abra o terminal e entre na pasta `backend`:
-   ```bash
-   cd backend
-   ```
-
-2. Construa a imagem Docker e inicialize o serviço:
-   ```bash
-   docker compose up --build -d
-   ```
-   > **Nota:** No primeiro build, o Docker baixará automaticamente os pesos neurais do ArcFace para dentro da imagem. Isso garante que o backend funcionará para sempre, mesmo que links externos da internet fiquem fora do ar.
-
-3. Verifique se o container está rodando e acompanhe os logs:
-   ```bash
-   docker logs -f liveness_verification_api
-   ```
-
-4. Teste no navegador do computador:
-   - Documentação Swagger Interativa: [http://localhost:8000/docs](http://localhost:8000/docs)
-   - Teste de Saúde da API: [http://localhost:8000/health](http://localhost:8000/health)
-
----
-
-### Passo 2: Rodar o Aplicativo Mobile (React Native / Expo)
-
-1. **Descubra o IP local do seu computador na rede Wi-Fi:**
-   - No Linux/Mac: execute `hostname -I` ou `ifconfig` (exemplo: `192.168.1.15`).
-   - No Windows: execute `ipconfig` (procure por Endereço IPv4).
-
-2. **Configure o IP no aplicativo:**
-   - **Opção A (Direto no Celular):** Abra o app no smartphone e clique em **⚙️ Configurar** logo abaixo do card de foto. Digite o IP do seu computador ou toque em um dos atalhos rápidos (*Wi-Fi*, *Emulador*, *Localhost*). Você pode inclusive tocar em **⚡ Testar Conectividade** para validar a conexão antes de iniciar o teste!
-   - **Opção B (Variável de Ambiente):** Defina `EXPO_PUBLIC_API_URL` ao iniciar o Expo:
-     ```bash
-     EXPO_PUBLIC_API_URL="http://192.168.1.15:8000" npx expo start
-     ```
-   - **Opção C (Arquivo):** Se preferir, altere o valor padrão no topo de `mobile/App.tsx`.
-
-3. **Instale as dependências e inicie o Expo:**
-   - No terminal, acesse a pasta `mobile`:
-     ```bash
-     cd ../mobile
-     npm install
-     npx expo start
-     ```
-
-4. **Abra o app no celular:**
-   - Abra o app **Expo Go** no seu celular físico.
-   - Aponte a câmera para o QR Code exibido no terminal.
-   - Selecione a foto de perfil/cadastro desejada e toque em **INICIAR TESTE**.
-   - Segure o celular na frente do rosto e aguarde o flash de cores confirmar sua autenticidade!
-
----
-
-## 🧪 Executando Testes Sintéticos sem Celular
-
-O backend inclui uma suíte completa de testes unitários automatizados que simulam vídeos com e sem reflexo espectral, avaliam a detecção de ausência de rosto e testam a seleção do frame mais nítido via Laplaciano:
+O backend contém todas as dependências pré-instaladas (Python 3.11, OpenCV Headless, FastAPI e os modelos ONNX):
 
 ```bash
-cd backend
+# Clone o repositório
+git clone https://github.com/Abraao-SPX/Reconhecimeto_Facil.git
+cd Reconhecimeto_Facil/backend
+
+# Inicie o container
+docker compose up -d --build
+```
+
+O serviço estará disponível em `http://localhost:8000`.
+* Documentação Swagger interativa: `http://localhost:8000/docs`
+* Health Check: `http://localhost:8000/health`
+
+---
+
+### 2️⃣ Subindo o App Mobile (Exemplo React Native / Expo)
+
+Na raiz do repositório:
+
+```bash
+cd mobile
+
+# Instale as dependências
+npm install --legacy-peer-deps
+
+# Inicie o servidor Metro
+npx expo start -c
+```
+
+1. Um **QR Code** será exibido no terminal.
+2. Abra o aplicativo **Expo Go** no seu celular Android ou iOS.
+3. Aponte a câmera para ler o QR Code.
+4. Pronto! O app abrirá no celular conectado ao backend.
+
+> [!tip] Conexão com o IP do Computador
+> Por padrão, o app aponta para o IP local da sua máquina na porta `8000` (ex: `http://192.168.1.44:8000`). Você pode alterar o IP a qualquer momento tocando na engrenagem **"Configurar IP do Servidor"** na tela inicial do app.
+
+---
+
+## 🎯 Modelo Matemático da Prova de Vida
+
+### 1. Reflexo Espectral Relativo ($\Delta$ RGB)
+Para resistir a salas com iluminação ambiente (lâmpadas fluorescentes, luz solar), o algoritmo calcula o ganho relativo em cada canal em relação ao frame escuro inicial ($t_0$):
+
+$$\Delta R = \frac{R_t - R_0}{R_0}, \quad \Delta G = \frac{G_t - G_0}{G_0}, \quad \Delta B = \frac{B_t - B_0}{B_0}$$
+
+O canal da cor esperada deve se destacar das demais em pelo menos 10%:
+* **VERMELHO:** $\Delta R > 1.10 \times \Delta G$ e $\Delta R > 1.10 \times \Delta B$
+* **AZUL:** $\Delta B > 1.10 \times \Delta R$ e $\Delta B > 1.10 \times \Delta G$
+* **VERDE:** $\Delta G > 1.10 \times \Delta R$ e $\Delta G > 1.10 \times \Delta B$
+
+### 2. Limiar Biométrico Rigoroso Anti-Fraude
+A comparação facial usa o modelo **SFace** com distância de cosseno:
+
+| Distância Obtida | Status | O que representa |
+| :--- | :---: | :--- |
+| **`0.00` a `0.30`** | **APROVADO ✅** | Rosto real idêntico ao titular cadastrado *(testes reais pontuaram `0.27`)*. |
+| **`Acima de 0.30`** | **REPROVADO ❌** | Rosto incompatível, foto na parede, tela de outro celular *(pontuam `0.58`+)*. |
+
+---
+
+## 📡 Documentação dos Endpoints REST
+
+### 1. `GET /health`
+Verifica a saúde do serviço e o modelo em execução.
+```bash
+curl -X GET http://localhost:8000/health
+```
+**Resposta:**
+```json
+{
+  "status": "ok",
+  "service": "Reconhecimento Fácil - Biometrics API",
+  "model": "YuNet-SFace",
+  "version": "1.1.0"
+}
+```
+
+---
+
+### 2. `GET /challenge`
+Gera a ordem aleatória das cores e o token de sessão para a Prova de Vida.
+```bash
+curl -X GET http://localhost:8000/challenge
+```
+**Resposta:**
+```json
+{
+  "session_token": "a8B9kL2xQp0vZt1R",
+  "colors": ["VERMELHO", "VERDE", "AZUL"],
+  "flash_duration_ms": 750
+}
+```
+
+---
+
+### 3. `POST /verify`
+Valida o vídeo da prova de vida e compara biometricamente contra a foto de cadastro.
+
+**Parâmetros (Multipart/form-data):**
+* `video`: Arquivo de vídeo gravado durante o flash (`.mp4`).
+* `profile_photo`: Foto de perfil / documento de referência (`.jpg` ou `.png`).
+* `expected_colors`: String com as cores do desafio separadas por vírgula (ex: `"VERMELHO,VERDE,AZUL"`).
+* `user_id`: Identificador único do usuário no seu sistema.
+
+```bash
+curl -X POST http://localhost:8000/verify \
+  -F "video=@challenge_video.mp4" \
+  -F "profile_photo=@minha_foto.jpg" \
+  -F "expected_colors=VERMELHO,VERDE,AZUL" \
+  -F "user_id=usuario_123"
+```
+
+**Resposta de Sucesso:**
+```json
+{
+  "verified": true,
+  "is_live": true,
+  "distance": 0.2707,
+  "threshold": 0.30,
+  "jwt_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "status": "Identidade confirmada com sucesso!"
+}
+```
+
+---
+
+### 4. `GET /verify/token/validate`
+Permite ao seu backend principal validar se o Token JWT emitido é autêntico e não foi forjado.
+```bash
+curl -X GET "http://localhost:8000/verify/token/validate?token=eyJhbGciOi..."
+```
+
+---
+
+## 📱 Exemplo de Integração em Flutter
+
+Integrar o **Reconhecimento Fácil** no Flutter é simples usando `http`:
+
+```dart
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+Future<void> verificarBiometria(String videoPath, String fotoPath, String cores, String userId) async {
+  var uri = Uri.parse('http://SEU_IP:8000/verify');
+  var request = http.MultipartRequest('POST', uri);
+
+  request.fields['expected_colors'] = cores;
+  request.fields['user_id'] = userId;
+  request.files.add(await http.MultipartFile.fromPath('video', videoPath));
+  request.files.add(await http.MultipartFile.fromPath('profile_photo', fotoPath));
+
+  var streamedResponse = await request.send();
+  var response = await http.Response.fromStream(streamedResponse);
+
+  if (response.statusCode == 200) {
+    var data = jsonDecode(response.body);
+    if (data['verified'] == true) {
+      print('Aprovado! Distância: ${data['distance']}');
+      print('Token JWT: ${data['jwt_token']}');
+    } else {
+      print('Reprovado: ${data['status']}');
+    }
+  }
+}
+```
+
+---
+
+## 🧪 Testes Automatizados
+
+O repositório já inclui suítes completas de testes unitários e de estresse dentro de `backend/`:
+
+```bash
+# Executa suíte de visão computacional e anti-spoofing
 python3 test_liveness.py
-```
-Resultado:
-```text
-🧪 [1/3] Testando rejeição imediata quando nenhum rosto é detectado...
-  -> Resultado: sucesso=False, mensagem='Nenhum rosto identificado no vídeo'
-  -> Rejeição sem rosto: PASSOU ✅
 
-🧪 [2/3] Testando seleção inteligente do melhor frame com filtro Laplaciano...
-  -> Score frame selecionado: 1452.33 vs borrado: 12.45
-  -> Seleção Laplaciana: PASSOU ✅
-
-🧪 [3/3] Testando algoritmo Delta RGB com ROI dinâmica...
-  -> Teste com reflexo real: PASSOU ✅ (Reflexo espectral correspondente à pele real.)
-  -> Teste com spoofing (sem reflexo): PASSOU ✅ (Reflexo não compatível)
-  -> Validação espectral Delta RGB: PASSOU ✅
-
-🎉 Todos os testes unitários foram concluídos com 100% de sucesso!
-```
-
-### Testes de Estresse, Criptografia e Resiliência
-
-Execute a suíte de estresse que valida assinatura de tokens JWT, proteção contra força bruta, decodificação de múltiplos formatos e imagens corrompidas:
-
-```bash
-cd backend
+# Executa suíte de estresse, criptografia JWT e rate limiting
 python3 test_stress.py
 ```
-Resultado:
-```text
-🧪 [Estresse 1/6] Testando geração e validação de Token JWT... PASSOU ✅
-🧪 [Estresse 2/6] Testando rejeição de Token JWT adulterado/forjado... PASSOU ✅
-🧪 [Estresse 3/6] Testando proteção contra força bruta (Rate Limiting)... PASSOU ✅
-🧪 [Estresse 4/6] Testando formatos de imagem (PNG, WEBP, JPG)... PASSOU ✅
-🧪 [Estresse 5/6] Testando resiliência contra arquivos corrompidos... PASSOU ✅
-🧪 [Estresse 6/6] Testando registro e retenção de logs de auditoria... PASSOU ✅
 
-🎉 Todos os 6 testes de estresse e resiliência foram concluídos com 100% de sucesso!
-```
-
----
-
-## 🔍 O que Já Está Implementado vs. Calibragens Futuras
-
-| Componente | Estado Atual | Detalhes Técnicos |
-| :--- | :---: | :--- |
-| **Prova de Vida por Cores** | ✅ Implementado | Algoritmo Delta RGB ($\Delta R, \Delta G, \Delta B$) que não quebra em salas iluminadas. |
-| **Reconhecimento Facial 1:1** | ✅ Implementado | ArcFace com extração de vetor 512D e distância por cosseno. |
-| **Isolamento de Ambiente** | ✅ Implementado | Dockerfile hermético com pré-download dos pesos neurais. |
-| **UX Sênior & Acessibilidade** | ✅ Implementado | 3 telas simples, botões grandes, síntese de voz (`expo-speech`), vibração tátil (`expo-haptics`) e switch de controle. |
-| **Detecção Facial Dinâmica (ROI)** | ✅ Implementado | Detector Haar Cascade localiza o rosto nos frames iniciais e ancora a medição na testa/bochechas. Rejeita sem rosto com mensagem padronizada. |
-| **Configuração de IP em Tela** | ✅ Implementado | Configuração em tempo real no app, atalhos rápidos (*Wi-Fi*, *Emulador*, *Localhost*), teste de conectividade e suporte a `EXPO_PUBLIC_API_URL`. |
-| **Seleção Inteligente de Frame** | ✅ Implementado | Varredura temporal com variância do filtro Laplaciano (`cv2.Laplacian`), eliminando motion blur e piscadas antes do ArcFace. |
-| **Tratamento Acolhedor de Erros** | ✅ Implementado | Captura de exceções técnicas do DeepFace e mensagens humanizadas em português orientando o idoso com clareza e empatia. |
-| **Token JWT & Selo de Perfil** | ✅ Implementado | Assinatura HMAC-SHA256 gerando token de atestação e `SELO_VERIFICADO_OURO` para integração direta com o Spring Boot do BeyondTime. |
-| **Rate Limiting & Auditoria** | ✅ Implementado | Proteção contra força bruta (máximo 5 req/min por IP) e buffer de auditoria com endpoint `/audit/logs`. |
-| **Resiliência de Rede** | ✅ Implementado | Mecanismo de retry automático com backoff exponencial no app mobile contra oscilações de Wi-Fi. |
+Resultados cobertos:
+* ✅ Rejeição imediata de vídeos sem rosto.
+* ✅ Seleção Laplaciana de nitidez sob desfoque severo.
+* ✅ Aprovação de reflexo espectral real e bloqueio de spoofing cinza/estático.
+* ✅ Assinatura digital HMAC-SHA256 e bloqueio de tokens adulterados com HTTP 401.
+* ✅ Rate Limiting protegendo contra força bruta com HTTP 429 após 5 requisições rápidas.
+* ✅ Tolerância a formatos PNG, WEBP, JPG e arquivos corrompidos.
 
 ---
 
 ## 📄 Licença
-Este projeto é distribuído sob licença livre e open-source para fins educacionais, proteção contra fraudes e desenvolvimento comunitário.
 
+Distribuído sob a licença **MIT**. Veja `LICENSE` para mais informações. Livre para uso comercial e pessoal.

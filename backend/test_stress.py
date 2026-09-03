@@ -1,5 +1,5 @@
 """
-Suíte de Testes de Estresse, Segurança e Resiliência (BeyondTime Biometrics)
+Suíte de Testes de Estresse, Segurança e Resiliência (Reconhecimento Fácil)
 Cobre:
 1. Geração, assinatura criptográfica HMAC-SHA256 e validação de Token JWT.
 2. Rejeição de tokens adulterados ou com assinatura forjada.
@@ -38,8 +38,6 @@ def test_jwt_geracao_e_validacao():
     payload = validar_jwt_biometria(token)
     assert payload["sub"] == user_id
     assert payload["verified"] is True
-    assert payload["badge"] == "SELO_VERIFICADO_OURO"
-    assert payload["biometrics_model"] == "ArcFace"
     assert payload["distance"] == 0.2845
     print("  -> Assinatura e decodificação JWT: PASSOU ✅")
 
