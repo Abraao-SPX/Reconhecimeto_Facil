@@ -11,10 +11,13 @@ import {
   Image,
   TextInput,
   ScrollView,
+  Switch,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Brightness from 'expo-brightness';
 import * as ImagePicker from 'expo-image-picker';
+import * as Speech from 'expo-speech';
+import * as Haptics from 'expo-haptics';
 import axios from 'axios';
 import { StatusBar } from 'expo-status-bar';
 
@@ -29,6 +32,61 @@ const COLOR_MAP: Record<string, string> = {
   VERDE: '#00FF00',
 };
 
+// Funções utilitárias seguras para Acessibilidade Sênior (Voz e Vibração)
+const speakInstruction = (text: string, enabled: boolean = true) => {
+  if (!enabled) return;
+  try {
+    Speech.stop();
+    Speech.speak(text, {
+      language: 'pt-BR',
+      rate: 0.88, // Fala ligeiramente mais calma para idosos
+      pitch: 1.0,
+    });
+  } catch (err) {
+    console.warn('Falha na síntese de voz:', err);
+  }
+};
+
+const triggerHapticFeedback = async (type: 'impact' | 'success' | 'error') => {
+  try {
+    if (type === 'impact') {
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } else if (type === 'success') {
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } else if (type === 'error') {
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    }
+  } catch (err) {
+    console.warn('Falha no haptic:', err);
+  }
+};
+
+// Função de resiliência de rede com Retry e Backoff Exponencial
+async function executeWithRetry<T>(
+  action: () => Promise<T>,
+  maxRetries: number = 3,
+  baseDelayMs: number = 1000,
+  onRetry?: (tentativa: number, total: number) => void
+): Promise<T> {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      return await action();
+    } catch (error: any) {
+      attempt++;
+      if (attempt >= maxRetries) {
+        throw error;
+      }
+      if (onRetry) {
+        onRetry(attempt, maxRetries);
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw new Error('Falha na comunicação após múltiplas tentativas.');
+}
+
 export default function App() {
   const [screenState, setScreenState] = useState<ScreenState>('START');
   const [permission, requestPermission] = useCameraPermissions();
@@ -37,6 +95,9 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [verificationData, setVerificationData] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Acessibilidade por Voz (Ativada por padrão para a terceira idade)
+  const [voiceAssistance, setVoiceAssistance] = useState<boolean>(true);
 
   // Configuração dinâmica de IP da API
   const [apiUrl, setApiUrl] = useState<string>(DEFAULT_API_URL);
@@ -95,6 +156,7 @@ export default function App() {
   const handleStartPress = async () => {
     let photoUri = profileImageUri;
     if (!photoUri) {
+      speakInstruction('Por favor, selecione primeiro uma foto de cadastro nítida.', voiceAssistance);
       Alert.alert(
         'Foto de Cadastro',
         'Selecione primeiro a foto de perfil/cadastro que será usada para comparar com o seu rosto.',
@@ -114,6 +176,7 @@ export default function App() {
       return;
     }
 
+    triggerHapticFeedback('impact');
     setScreenState('LIVENESS');
   };
 
@@ -122,9 +185,15 @@ export default function App() {
     const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
       setStatusMessage('Buscando sequência com o servidor...');
+      speakInstruction('Posicione seu rosto na moldura e olhe para a tela.', voiceAssistance);
 
-      // 1. Obtém desafio dinâmico da API
-      const res = await axios.get(`${cleanUrl}/challenge`, { timeout: 6000 });
+      // 1. Obtém desafio dinâmico da API com retry automático contra instabilidade
+      const res = await executeWithRetry(
+        () => axios.get(`${cleanUrl}/challenge`, { timeout: 5000 }),
+        3,
+        1000,
+        (att, tot) => setStatusMessage(`Reconectando ao servidor (${att}/${tot})...`)
+      );
       const { colors, flash_duration_ms } = res.data;
 
       // 2. Eleva brilho da tela ao máximo
@@ -136,6 +205,7 @@ export default function App() {
       }
 
       setStatusMessage('Fique olhando para a tela...');
+      triggerHapticFeedback('impact');
 
       // 3. Inicia gravação de vídeo
       const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 5 });
@@ -144,9 +214,10 @@ export default function App() {
       setBackgroundColor('#000000');
       await new Promise((r) => setTimeout(r, 300));
 
-      // 4. Alterna as cores do desafio
+      // 4. Alterna as cores do desafio com micro-vibrações táteis
       for (const color of colors) {
         setBackgroundColor(COLOR_MAP[color] || '#FFFFFF');
+        triggerHapticFeedback('impact');
         await new Promise((r) => setTimeout(r, flash_duration_ms || 750));
       }
 
@@ -162,6 +233,7 @@ export default function App() {
       // 6. Passa para processamento
       setScreenState('PROCESSING');
       setStatusMessage('Analisando reflexo e linhas faciais (ArcFace)...');
+      speakInstruction('Analisando seus traços faciais. Só um momento.', voiceAssistance);
 
       if (videoData?.uri && profileImageUri) {
         await sendVerification(videoData.uri, profileImageUri, colors);
@@ -171,8 +243,11 @@ export default function App() {
     } catch (error: any) {
       console.error(error);
       setBackgroundColor('#000000');
-      setErrorMessage(error.message || 'Falha ao conectar com o servidor.');
+      const errTxt = error.message || 'Falha ao conectar com o servidor.';
+      setErrorMessage(errTxt);
       setScreenState('FAILURE');
+      triggerHapticFeedback('error');
+      speakInstruction('Não foi possível concluir o teste. Verifique a conexão e tente novamente.', voiceAssistance);
     }
   };
 
@@ -187,7 +262,7 @@ export default function App() {
     }
   }, [screenState]);
 
-  // Envia vídeo e foto para o Backend
+  // Envia vídeo e foto para o Backend com resiliência de rede
   const sendVerification = async (videoUri: string, profileUri: string, colors: string[]) => {
     const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
@@ -206,32 +281,46 @@ export default function App() {
         type: 'image/jpeg',
       } as any);
 
-      const response = await axios.post(`${cleanUrl}/verify`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 40000,
-      });
+      const response = await executeWithRetry(
+        () =>
+          axios.post(`${cleanUrl}/verify`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: 45000,
+          }),
+        2,
+        1500,
+        (att, tot) => setStatusMessage(`Enviando dados biométricos (${att}/${tot})...`)
+      );
 
       setVerificationData(response.data);
 
       if (response.data.verified) {
         setScreenState('SUCCESS');
+        triggerHapticFeedback('success');
+        speakInstruction('Identidade confirmada com sucesso! Teste biométrico aprovado.', voiceAssistance);
       } else {
-        setErrorMessage(
+        const failReason =
           response.data.reason ||
           response.data.status ||
-          'A verificação não atingiu o nível de confiança necessário.'
-        );
+          'A verificação não atingiu o nível de confiança necessário.';
+        setErrorMessage(failReason);
         setScreenState('FAILURE');
+        triggerHapticFeedback('error');
+        speakInstruction(failReason, voiceAssistance);
       }
     } catch (err: any) {
       console.error(err);
-      setErrorMessage(err.response?.data?.detail || err.message || 'Erro de comunicação com o servidor.');
+      const errDetail = err.response?.data?.detail || err.message || 'Erro de comunicação com o servidor.';
+      setErrorMessage(errDetail);
       setScreenState('FAILURE');
+      triggerHapticFeedback('error');
+      speakInstruction('Ocorreu uma falha de conexão com o servidor. Tente novamente.', voiceAssistance);
     }
   };
 
   // Reinicia o fluxo para a Tela 1
   const resetToStart = () => {
+    Speech.stop();
     setVerificationData(null);
     setErrorMessage('');
     setBackgroundColor('#000000');
@@ -346,6 +435,26 @@ export default function App() {
             )}
           </View>
 
+          {/* ACESSIBILIDADE SÊNIOR: VOZ */}
+          <View style={styles.voiceConfigRow}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+              <Text style={styles.voiceIcon}>🔊</Text>
+              <View style={{ marginLeft: 10 }}>
+                <Text style={styles.voiceTitle}>Instruções por Voz</Text>
+                <Text style={styles.voiceSubtitle}>Auxílio falado passo a passo</Text>
+              </View>
+            </View>
+            <Switch
+              value={voiceAssistance}
+              onValueChange={(val) => {
+                setVoiceAssistance(val);
+                if (val) speakInstruction('Instruções por voz ativadas.', true);
+              }}
+              trackColor={{ false: '#334155', true: '#2563EB' }}
+              thumbColor={voiceAssistance ? '#38BDF8' : '#94A3B8'}
+            />
+          </View>
+
           {/* BOTÃO ÚNICO DE INICIAR */}
           <View style={styles.bottomArea}>
             <TouchableOpacity style={styles.startMainButton} onPress={handleStartPress}>
@@ -414,9 +523,19 @@ export default function App() {
           <View style={styles.resultDetailsCard}>
             <Text style={styles.detailItem}>✅ Prova de Vida por Luz: Aprovada</Text>
             <Text style={styles.detailItem}>✅ Rosto Compatível com Cadastro</Text>
+            {verificationData?.badge && (
+              <Text style={[styles.detailItem, { color: '#FCD34D' }]}>
+                🏅 Selo: {verificationData.badge}
+              </Text>
+            )}
             {verificationData?.distance !== undefined && (
               <Text style={styles.distanceText}>
                 Distância Biométrica: {verificationData.distance} (Limite: {verificationData.threshold})
+              </Text>
+            )}
+            {verificationData?.jwt_token && (
+              <Text style={styles.jwtPreviewText} numberOfLines={1}>
+                Token de Segurança: {verificationData.jwt_token.substring(0, 28)}...
               </Text>
             )}
           </View>
@@ -629,6 +748,32 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
+  voiceConfigRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#1E293B',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    width: '100%',
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  voiceIcon: {
+    fontSize: 22,
+  },
+  voiceTitle: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: 'bold',
+  },
+  voiceSubtitle: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginTop: 2,
+  },
   bottomArea: {
     width: '100%',
   },
@@ -760,6 +905,15 @@ const styles = StyleSheet.create({
     color: '#CBD5E1',
     fontSize: 13,
     marginTop: 8,
+  },
+  jwtPreviewText: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    marginTop: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+    padding: 6,
+    borderRadius: 6,
   },
   successButton: {
     backgroundColor: '#FFFFFF',

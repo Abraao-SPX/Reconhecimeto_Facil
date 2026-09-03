@@ -3,15 +3,20 @@ import shutil
 import tempfile
 import random
 import string
+import time
+import json
+import hmac
+import hashlib
+import base64
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="BeyondTime - Liveness & Face Verification Service",
-    description="Serviço biométrico anti-spoofing com flash espectral de cores e ArcFace",
-    version="1.0.0"
+    description="Serviço biométrico anti-spoofing com flash espectral de cores, ArcFace, JWT e Rate Limiting",
+    version="1.1.0"
 )
 
 # Habilita CORS para permitir chamadas diretas do React Native no celular
@@ -25,12 +30,107 @@ app.add_middleware(
 
 CORES_DISPONIVEIS = ["VERMELHO", "AZUL", "VERDE"]
 
+# ==============================================================================
+# SEGURANÇA: RATE LIMITING CONTRA FORÇA BRUTA (SLIDING WINDOW)
+# ==============================================================================
+VERIFY_ATTEMPTS: dict[str, list[float]] = {}
+MAX_ATTEMPTS_PER_MINUTE = 5
+RATE_LIMIT_WINDOW_SECONDS = 60
+
+def aplicar_rate_limit(client_ip: str):
+    """Bloqueia tentativas consecutivas automatizadas por força bruta."""
+    now = time.time()
+    timestamps = VERIFY_ATTEMPTS.get(client_ip, [])
+    # Filtra apenas tentativas dentro da janela recente
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW_SECONDS]
+    if len(timestamps) >= MAX_ATTEMPTS_PER_MINUTE:
+        raise HTTPException(
+            status_code=429,
+            detail="Muitas tentativas consecutivas de verificação. Por favor, aguarde 1 minuto para tentar novamente."
+        )
+    timestamps.append(now)
+    VERIFY_ATTEMPTS[client_ip] = timestamps
+
+# ==============================================================================
+# SEGURANÇA: INTEGRAÇÃO COM SPRING BOOT (TOKEN JWT ASSINADO HS256)
+# ==============================================================================
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "beyondtime_super_secret_biometric_key_2026")
+
+def base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
+
+def base64url_decode(data_str: str) -> bytes:
+    rem = len(data_str) % 4
+    if rem > 0:
+        data_str += '=' * (4 - rem)
+    return base64.urlsafe_b64decode(data_str)
+
+def gerar_jwt_biometria(user_id: str, distance: float, threshold: float) -> str:
+    """Gera um Token JWT assinado HMAC-SHA256 para atestar a aprovação biométrica ao backend principal."""
+    header = {"alg": "HS256", "typ": "JWT"}
+    now = int(time.time())
+    payload = {
+        "sub": user_id,
+        "verified": True,
+        "badge": "SELO_VERIFICADO_OURO",
+        "biometrics_model": "ArcFace",
+        "distance": round(distance, 4),
+        "threshold": threshold,
+        "iat": now,
+        "exp": now + (24 * 3600), # Válido por 24 horas
+        "iss": "beyondtime-biometrics-service"
+    }
+    header_bytes = json.dumps(header, separators=(',', ':')).encode('utf-8')
+    payload_bytes = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+
+    h_b64 = base64url_encode(header_bytes)
+    p_b64 = base64url_encode(payload_bytes)
+    message = f"{h_b64}.{p_b64}".encode('utf-8')
+
+    signature = hmac.new(JWT_SECRET_KEY.encode('utf-8'), message, hashlib.sha256).digest()
+    sig_b64 = base64url_encode(signature)
+
+    return f"{h_b64}.{p_b64}.{sig_b64}"
+
+def validar_jwt_biometria(token: str) -> dict:
+    """Valida e decodifica o Token JWT gerado pelo serviço biométrico."""
+    parts = token.split('.')
+    if len(parts) != 3:
+        raise HTTPException(status_code=400, detail="Formato de token JWT inválido.")
+
+    h_b64, p_b64, sig_b64 = parts
+    message = f"{h_b64}.{p_b64}".encode('utf-8')
+    expected_sig = hmac.new(JWT_SECRET_KEY.encode('utf-8'), message, hashlib.sha256).digest()
+
+    if not hmac.compare_digest(base64url_encode(expected_sig), sig_b64):
+        raise HTTPException(status_code=401, detail="Assinatura de token biométrico inválida.")
+
+    payload = json.loads(base64url_decode(p_b64).decode('utf-8'))
+    if payload.get("exp", 0) < time.time():
+        raise HTTPException(status_code=401, detail="Token biométrico expirado.")
+
+    return payload
+
+# ==============================================================================
+# AUDITORIA ANTIFRAUDE: REGISTRO DE TENTATIVAS EM MEMÓRIA
+# ==============================================================================
+AUDIT_LOGS: list[dict] = []
+MAX_AUDIT_LOGS = 200
+
+def registrar_auditoria(entry: dict):
+    """Armazena logs de auditoria para inspeção de tentativas de fraude."""
+    entry["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    AUDIT_LOGS.append(entry)
+    if len(AUDIT_LOGS) > MAX_AUDIT_LOGS:
+        AUDIT_LOGS.pop(0)
+
 @app.get("/health")
 def health_check():
     return {
         "status": "ok",
         "service": "BeyondTime Liveness & Biometrics API",
-        "model": "ArcFace"
+        "model": "ArcFace",
+        "version": "1.1.0"
     }
 
 @app.get("/challenge")
@@ -46,6 +146,17 @@ def get_challenge():
         "colors": cores_sorteadas,
         "flash_duration_ms": 750
     }
+
+@app.get("/verify/token/validate")
+def validate_token_endpoint(token: str = Query(..., description="Token JWT biométrico")):
+    """Permite ao backend Spring Boot do BeyondTime validar o token emitido."""
+    payload = validar_jwt_biometria(token)
+    return {"valid": True, "claims": payload}
+
+@app.get("/audit/logs")
+def get_audit_logs(limit: int = Query(50, ge=1, le=200)):
+    """Retorna os registros de auditoria mais recentes para análise antifraude."""
+    return {"total": len(AUDIT_LOGS), "logs": AUDIT_LOGS[-limit:]}
 
 # Inicializa detector Haar Cascade nativo do OpenCV para detecção de face no baseline
 FACE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -247,10 +358,16 @@ def validar_reflexo_delta_rgb(
 
 @app.post("/verify")
 async def verify_identity(
+    request: Request,
     video: UploadFile = File(...),
     profile_photo: UploadFile = File(...),
-    expected_colors: str = Form(...) # Ex: "VERMELHO,AZUL,VERDE"
+    expected_colors: str = Form(...), # Ex: "VERMELHO,AZUL,VERDE"
+    user_id: str = Form("senior_user_anonymous")
 ):
+    # 1. Proteção contra ataques automatizados (Rate Limiting de 5 req/min por IP)
+    client_ip = request.client.host if request.client else "unknown"
+    aplicar_rate_limit(client_ip)
+
     cores = [c.strip() for c in expected_colors.split(",") if c.strip()]
     temp_dir = tempfile.mkdtemp()
 
@@ -268,6 +385,13 @@ async def verify_identity(
         # 2. ETAPA 1: Prova de Vida Ativa com ROI Dinâmica do Rosto
         is_live, liveness_msg, face_roi = validar_reflexo_delta_rgb(video_path, cores)
         if not is_live:
+            registrar_auditoria({
+                "client_ip": client_ip,
+                "user_id": user_id,
+                "verified": False,
+                "is_live": False,
+                "reason": liveness_msg
+            })
             return {
                 "verified": False,
                 "is_live": False,
@@ -301,6 +425,13 @@ async def verify_identity(
                 else:
                     msg_amigavel = "Não conseguimos identificar seu rosto na foto de cadastro. Por favor, escolha uma foto mais nítida e bem iluminada."
 
+                registrar_auditoria({
+                    "client_ip": client_ip,
+                    "user_id": user_id,
+                    "verified": False,
+                    "is_live": True,
+                    "reason": msg_amigavel
+                })
                 return {
                     "verified": False,
                     "is_live": True,
@@ -313,15 +444,41 @@ async def verify_identity(
         distance = float(resultado.get("distance", 1.0))
         threshold = float(resultado.get("threshold", 0.68))
 
+        # 5. ETAPA 4: Geração de Token JWT Assinado e Atribuição de Selo
+        badge = None
+        jwt_token = None
+        if verified:
+            badge = "SELO_VERIFICADO_OURO"
+            jwt_token = gerar_jwt_biometria(user_id, distance, threshold)
+
+        registrar_auditoria({
+            "client_ip": client_ip,
+            "user_id": user_id,
+            "verified": verified,
+            "is_live": True,
+            "distance": round(distance, 4),
+            "badge": badge,
+            "reason": "Sucesso" if verified else "Distância acima do limiar"
+        })
+
         return {
             "verified": verified,
             "is_live": True,
             "distance": round(distance, 4),
             "threshold": threshold,
+            "badge": badge,
+            "jwt_token": jwt_token,
             "status": "Identidade confirmada com sucesso!" if verified else "Rosto não compatível com o perfil cadastrado."
         }
 
     except Exception as e:
+        registrar_auditoria({
+            "client_ip": client_ip,
+            "user_id": user_id,
+            "verified": False,
+            "is_live": False,
+            "error": str(e)
+        })
         return {"verified": False, "is_live": False, "error": str(e)}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

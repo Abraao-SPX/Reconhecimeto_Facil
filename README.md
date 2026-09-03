@@ -180,6 +180,26 @@ Resultado:
 🎉 Todos os testes unitários foram concluídos com 100% de sucesso!
 ```
 
+### Testes de Estresse, Criptografia e Resiliência
+
+Execute a suíte de estresse que valida assinatura de tokens JWT, proteção contra força bruta, decodificação de múltiplos formatos e imagens corrompidas:
+
+```bash
+cd backend
+python3 test_stress.py
+```
+Resultado:
+```text
+🧪 [Estresse 1/6] Testando geração e validação de Token JWT... PASSOU ✅
+🧪 [Estresse 2/6] Testando rejeição de Token JWT adulterado/forjado... PASSOU ✅
+🧪 [Estresse 3/6] Testando proteção contra força bruta (Rate Limiting)... PASSOU ✅
+🧪 [Estresse 4/6] Testando formatos de imagem (PNG, WEBP, JPG)... PASSOU ✅
+🧪 [Estresse 5/6] Testando resiliência contra arquivos corrompidos... PASSOU ✅
+🧪 [Estresse 6/6] Testando registro e retenção de logs de auditoria... PASSOU ✅
+
+🎉 Todos os 6 testes de estresse e resiliência foram concluídos com 100% de sucesso!
+```
+
 ---
 
 ## 🔍 O que Já Está Implementado vs. Calibragens Futuras
@@ -189,11 +209,14 @@ Resultado:
 | **Prova de Vida por Cores** | ✅ Implementado | Algoritmo Delta RGB ($\Delta R, \Delta G, \Delta B$) que não quebra em salas iluminadas. |
 | **Reconhecimento Facial 1:1** | ✅ Implementado | ArcFace com extração de vetor 512D e distância por cosseno. |
 | **Isolamento de Ambiente** | ✅ Implementado | Dockerfile hermético com pré-download dos pesos neurais. |
-| **UX Sênior (Acessibilidade)** | ✅ Implementado | 3 telas simples, botões grandes, contraste visual e zero comandos motores difíceis. |
+| **UX Sênior & Acessibilidade** | ✅ Implementado | 3 telas simples, botões grandes, síntese de voz (`expo-speech`), vibração tátil (`expo-haptics`) e switch de controle. |
 | **Detecção Facial Dinâmica (ROI)** | ✅ Implementado | Detector Haar Cascade localiza o rosto nos frames iniciais e ancora a medição na testa/bochechas. Rejeita sem rosto com mensagem padronizada. |
 | **Configuração de IP em Tela** | ✅ Implementado | Configuração em tempo real no app, atalhos rápidos (*Wi-Fi*, *Emulador*, *Localhost*), teste de conectividade e suporte a `EXPO_PUBLIC_API_URL`. |
 | **Seleção Inteligente de Frame** | ✅ Implementado | Varredura temporal com variância do filtro Laplaciano (`cv2.Laplacian`), eliminando motion blur e piscadas antes do ArcFace. |
 | **Tratamento Acolhedor de Erros** | ✅ Implementado | Captura de exceções técnicas do DeepFace e mensagens humanizadas em português orientando o idoso com clareza e empatia. |
+| **Token JWT & Selo de Perfil** | ✅ Implementado | Assinatura HMAC-SHA256 gerando token de atestação e `SELO_VERIFICADO_OURO` para integração direta com o Spring Boot do BeyondTime. |
+| **Rate Limiting & Auditoria** | ✅ Implementado | Proteção contra força bruta (máximo 5 req/min por IP) e buffer de auditoria com endpoint `/audit/logs`. |
+| **Resiliência de Rede** | ✅ Implementado | Mecanismo de retry automático com backoff exponencial no app mobile contra oscilações de Wi-Fi. |
 
 ---
 
