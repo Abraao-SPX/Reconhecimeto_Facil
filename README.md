@@ -273,6 +273,18 @@ Resultados cobertos:
 
 ---
 
+## 🎖️ Créditos e Atribuições Open Source
+
+Este projeto integra tecnologias de ponta desenvolvidas pela comunidade global de código aberto:
+
+* **[OpenCV Zoo - YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet):** Modelo ultrarrápido de detecção facial e 5 marcos anatômicos desenvolvido por Shiqi Yu et al. (Licença Apache 2.0).
+* **[OpenCV Zoo - SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface):** Rede neural de extração de características faciais baseada em SphereFace desenvolvida por Zhong et al. (Licença Apache 2.0).
+* **[MiniFASNet](https://github.com/yakhyo/face-anti-spoofing):** Rede neural leve para detecção de ataques de apresentação e anti-spoofing facial (Licença Apache 2.0).
+* **[FastAPI](https://fastapi.tiangolo.com/):** Framework web assíncrono de alta performance desenvolvido por Sebastián Ramírez (Licença MIT).
+* **[Expo / React Native](https://expo.dev/):** Plataforma para desenvolvimento mobile nativo multiplataforma (Licença MIT).
+
+---
+
 ## 📄 Licença
 
-Distribuído sob a licença **MIT**. Veja `LICENSE` para mais informações. Livre para uso comercial e pessoal.
+Distribuído sob a licença **MIT** por **Abraão Paixão**. Consulte o arquivo [`LICENSE`](LICENSE) para mais informações. Livre para uso pessoal, acadêmico e comercial.
