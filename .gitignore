@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+
+# Ambientes virtuais e variáveis de ambiente
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+env/
+ENV/
+
+# Bancos de dados e modelos/pesos binários
+*.db
+*.sqlite
+*.sqlite3
+*.joblib
+*.pkl
+*.h5
+
+# Node / React Native / Expo
+node_modules/
+.expo/
+dist/
+web-build/
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# IDEs e Sistema Operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

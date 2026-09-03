@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "BeyondTime Liveness",
+    "slug": "beyondtime-liveness",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "O BeyondTime precisa da câmera para verificar sua identidade com segurança e evitar perfis falsos."
+        }
+      ],
+      [
+        "expo-brightness",
+        {
+          "brightnessPermission": "Permite ajustar o brilho durante o teste de prova de vida."
+        }
+      ]
+    ],
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0F172A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET"
+      ]
+    },
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "A câmera é necessária para verificar sua identidade com segurança e evitar perfis falsos."
+      }
+    }
+  }
+}
