@@ -13,13 +13,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Baixa previamente os modelos neurais para operação autônoma offline
-RUN mkdir -p /app/models && \
-    python3 -c "import urllib.request; \
-    urllib.request.urlretrieve('https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx', '/app/models/face_detection_yunet_2023mar.onnx'); \
-    urllib.request.urlretrieve('https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx', '/app/models/face_recognition_sface_2021dec.onnx')" && \
-    python -c "from deepface import DeepFace; DeepFace.build_model('ArcFace')"
-
+# Copia todo o código fonte e os modelos neurais locais (YuNet, SFace, MiniFASNet)
+# 100% autônomo e offline: não depende de downloads externos durante o build
 COPY . .
 
 EXPOSE 8000

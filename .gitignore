@@ -37,7 +37,6 @@ ENV/
 *.joblib
 *.pkl
 *.h5
-*.onnx
 debug/
 backend/debug/
 
