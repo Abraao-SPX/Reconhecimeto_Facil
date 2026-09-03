@@ -131,11 +131,12 @@ Antes de começar, verifique se você tem instalado no seu computador:
    - No Windows: execute `ipconfig` (procure por Endereço IPv4).
 
 2. **Configure o IP no aplicativo:**
-   - Abra o arquivo `mobile/App.tsx`.
-   - Na linha 20, substitua pelo IP do seu computador:
-     ```typescript
-     const API_BASE_URL = 'http://192.168.1.15:8000'; // Substitua pelo seu IP
+   - **Opção A (Direto no Celular):** Abra o app no smartphone e clique em **⚙️ Configurar** logo abaixo do card de foto. Digite o IP do seu computador ou toque em um dos atalhos rápidos (*Wi-Fi*, *Emulador*, *Localhost*). Você pode inclusive tocar em **⚡ Testar Conectividade** para validar a conexão antes de iniciar o teste!
+   - **Opção B (Variável de Ambiente):** Defina `EXPO_PUBLIC_API_URL` ao iniciar o Expo:
+     ```bash
+     EXPO_PUBLIC_API_URL="http://192.168.1.15:8000" npx expo start
      ```
+   - **Opção C (Arquivo):** Se preferir, altere o valor padrão no topo de `mobile/App.tsx`.
 
 3. **Instale as dependências e inicie o Expo:**
    - No terminal, acesse a pasta `mobile`:
@@ -155,18 +156,28 @@ Antes de começar, verifique se você tem instalado no seu computador:
 
 ## 🧪 Executando Testes Sintéticos sem Celular
 
-O backend inclui um script automatizado que gera vídeos sintéticos com e sem reflexo de luz para testar os algoritmos de visão computacional:
+O backend inclui uma suíte completa de testes unitários automatizados que simulam vídeos com e sem reflexo espectral, avaliam a detecção de ausência de rosto e testam a seleção do frame mais nítido via Laplaciano:
 
 ```bash
 cd backend
 python3 test_liveness.py
 ```
-Resultado esperado:
+Resultado:
 ```text
-🧪 Iniciando teste unitário de Liveness Delta RGB...
+🧪 [1/3] Testando rejeição imediata quando nenhum rosto é detectado...
+  -> Resultado: sucesso=False, mensagem='Nenhum rosto identificado no vídeo'
+  -> Rejeição sem rosto: PASSOU ✅
+
+🧪 [2/3] Testando seleção inteligente do melhor frame com filtro Laplaciano...
+  -> Score frame selecionado: 1452.33 vs borrado: 12.45
+  -> Seleção Laplaciana: PASSOU ✅
+
+🧪 [3/3] Testando algoritmo Delta RGB com ROI dinâmica...
   -> Teste com reflexo real: PASSOU ✅ (Reflexo espectral correspondente à pele real.)
   -> Teste com spoofing (sem reflexo): PASSOU ✅ (Reflexo não compatível)
-🎉 Todos os testes de validação espectral foram concluídos com sucesso!
+  -> Validação espectral Delta RGB: PASSOU ✅
+
+🎉 Todos os testes unitários foram concluídos com 100% de sucesso!
 ```
 
 ---
@@ -179,9 +190,10 @@ Resultado esperado:
 | **Reconhecimento Facial 1:1** | ✅ Implementado | ArcFace com extração de vetor 512D e distância por cosseno. |
 | **Isolamento de Ambiente** | ✅ Implementado | Dockerfile hermético com pré-download dos pesos neurais. |
 | **UX Sênior (Acessibilidade)** | ✅ Implementado | 3 telas simples, botões grandes, contraste visual e zero comandos motores difíceis. |
-| **Detecção Facial Dinâmica (ROI)** | ⚠️ Recomendado | Adicionar detecção de face no baseline para garantir que a área amostrada é pele e não parede. |
-| **Configuração de IP em Tela** | ⚠️ Recomendado | Permitir alterar o IP da API diretamente na tela do app para testes rápidos em diferentes redes. |
-| **Seleção de Frame mais Nítido** | ⚠️ Recomendado | Utilizar variância do Laplaciano para escolher o melhor frame antes do ArcFace. |
+| **Detecção Facial Dinâmica (ROI)** | ✅ Implementado | Detector Haar Cascade localiza o rosto nos frames iniciais e ancora a medição na testa/bochechas. Rejeita sem rosto com mensagem padronizada. |
+| **Configuração de IP em Tela** | ✅ Implementado | Configuração em tempo real no app, atalhos rápidos (*Wi-Fi*, *Emulador*, *Localhost*), teste de conectividade e suporte a `EXPO_PUBLIC_API_URL`. |
+| **Seleção Inteligente de Frame** | ✅ Implementado | Varredura temporal com variância do filtro Laplaciano (`cv2.Laplacian`), eliminando motion blur e piscadas antes do ArcFace. |
+| **Tratamento Acolhedor de Erros** | ✅ Implementado | Captura de exceções técnicas do DeepFace e mensagens humanizadas em português orientando o idoso com clareza e empatia. |
 
 ---
 

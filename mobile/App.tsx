@@ -9,6 +9,8 @@ import {
   SafeAreaView,
   Dimensions,
   Image,
+  TextInput,
+  ScrollView,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Brightness from 'expo-brightness';
@@ -16,8 +18,8 @@ import * as ImagePicker from 'expo-image-picker';
 import axios from 'axios';
 import { StatusBar } from 'expo-status-bar';
 
-// Altere para o IP local do seu computador na mesma rede Wi-Fi (ex: http://192.168.1.15:8000)
-const API_BASE_URL = 'http://192.168.1.15:8000';
+// Endereço IP padrão: suporta variável de ambiente EXPO_PUBLIC_API_URL ou fallback
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.15:8000';
 
 type ScreenState = 'START' | 'LIVENESS' | 'PROCESSING' | 'SUCCESS' | 'FAILURE';
 
@@ -35,6 +37,11 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [verificationData, setVerificationData] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Configuração dinâmica de IP da API
+  const [apiUrl, setApiUrl] = useState<string>(DEFAULT_API_URL);
+  const [showServerConfig, setShowServerConfig] = useState<boolean>(false);
+  const [isTestingServer, setIsTestingServer] = useState<boolean>(false);
 
   const cameraRef = useRef<CameraView>(null);
 
@@ -58,6 +65,30 @@ export default function App() {
       return result.assets[0].uri;
     }
     return null;
+  };
+
+  // Testa conectividade com o backend diretamente pelo app
+  const handleTestConnection = async () => {
+    setIsTestingServer(true);
+    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
+    try {
+      const res = await axios.get(`${cleanUrl}/health`, { timeout: 4000 });
+      if (res.data?.status === 'ok') {
+        Alert.alert(
+          'Servidor Online! ✅',
+          `Conexão bem-sucedida com o backend.\nModelo: ${res.data.model || 'ArcFace'}\nServiço: ${res.data.service || 'BeyondTime'}`
+        );
+      } else {
+        Alert.alert('Aviso ⚠️', 'O servidor respondeu com formato inesperado.');
+      }
+    } catch (err: any) {
+      Alert.alert(
+        'Falha na Conexão ❌',
+        `Não foi possível conectar a:\n${cleanUrl}\n\nVerifique se o backend está rodando no Docker e se o celular está no mesmo Wi-Fi.`
+      );
+    } finally {
+      setIsTestingServer(false);
+    }
   };
 
   // Botão "INICIAR TESTE" da Tela 1
@@ -88,11 +119,12 @@ export default function App() {
 
   // Executa o desafio do flash de cores na Tela 2
   const runLivenessSequence = async () => {
+    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
       setStatusMessage('Buscando sequência com o servidor...');
-      
+
       // 1. Obtém desafio dinâmico da API
-      const res = await axios.get(`${API_BASE_URL}/challenge`, { timeout: 5000 });
+      const res = await axios.get(`${cleanUrl}/challenge`, { timeout: 6000 });
       const { colors, flash_duration_ms } = res.data;
 
       // 2. Eleva brilho da tela ao máximo
@@ -157,6 +189,7 @@ export default function App() {
 
   // Envia vídeo e foto para o Backend
   const sendVerification = async (videoUri: string, profileUri: string, colors: string[]) => {
+    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
       const formData = new FormData();
       formData.append('expected_colors', colors.join(','));
@@ -173,9 +206,9 @@ export default function App() {
         type: 'image/jpeg',
       } as any);
 
-      const response = await axios.post(`${API_BASE_URL}/verify`, formData, {
+      const response = await axios.post(`${cleanUrl}/verify`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 35000,
+        timeout: 40000,
       });
 
       setVerificationData(response.data);
@@ -212,40 +245,114 @@ export default function App() {
     return (
       <SafeAreaView style={styles.startContainer}>
         <StatusBar style="light" />
-        <View style={styles.header}>
-          <Text style={styles.appTitle}>BEYONDTIME</Text>
-          <Text style={styles.appSubtitle}>Verificação Facial Anti-Golpe</Text>
-        </View>
+        <ScrollView
+          contentContainerStyle={styles.startScrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.header}>
+            <Text style={styles.appTitle}>BEYONDTIME</Text>
+            <Text style={styles.appSubtitle}>Verificação Facial Anti-Golpe</Text>
+          </View>
 
-        <View style={styles.startCard}>
-          <Text style={styles.cardEmoji}>🛡️</Text>
-          <Text style={styles.startInstruction}>
-            Teste de prova de vida e reconhecimento facial com flash de cores.
-          </Text>
+          <View style={styles.startCard}>
+            <Text style={styles.cardEmoji}>🛡️</Text>
+            <Text style={styles.startInstruction}>
+              Teste de prova de vida e reconhecimento facial com flash de cores.
+            </Text>
 
-          {profileImageUri ? (
-            <View style={styles.profileBadge}>
-              <Image source={{ uri: profileImageUri }} style={styles.thumbImage} />
-              <View style={{ marginLeft: 12 }}>
-                <Text style={styles.profileBadgeTitle}>Foto Selecionada</Text>
-                <TouchableOpacity onPress={pickProfilePhoto}>
-                  <Text style={styles.changePhotoText}>Trocar foto</Text>
+            {profileImageUri ? (
+              <View style={styles.profileBadge}>
+                <Image source={{ uri: profileImageUri }} style={styles.thumbImage} />
+                <View style={{ marginLeft: 12, flex: 1 }}>
+                  <Text style={styles.profileBadgeTitle}>Foto Selecionada</Text>
+                  <TouchableOpacity onPress={pickProfilePhoto}>
+                    <Text style={styles.changePhotoText}>Trocar foto</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              <TouchableOpacity style={styles.pickPhotoBtn} onPress={pickProfilePhoto}>
+                <Text style={styles.pickPhotoBtnText}>📷 Escolher Foto de Cadastro</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* CARD DE CONFIGURAÇÃO DE IP / SERVIDOR */}
+          <View style={styles.serverConfigCard}>
+            <TouchableOpacity
+              style={styles.serverConfigHeader}
+              onPress={() => setShowServerConfig(!showServerConfig)}
+              activeOpacity={0.7}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                <Text style={styles.serverConfigIcon}>🌐</Text>
+                <View style={{ marginLeft: 8, flex: 1 }}>
+                  <Text style={styles.serverConfigLabel}>Servidor Backend (API)</Text>
+                  <Text style={styles.serverConfigValue} numberOfLines={1}>
+                    {apiUrl}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.serverToggleText}>{showServerConfig ? '▲ Fechar' : '⚙️ Configurar'}</Text>
+            </TouchableOpacity>
+
+            {showServerConfig && (
+              <View style={styles.serverConfigBody}>
+                <Text style={styles.inputFieldLabel}>Endereço do Servidor:</Text>
+                <TextInput
+                  style={styles.serverInput}
+                  value={apiUrl}
+                  onChangeText={setApiUrl}
+                  placeholder="http://192.168.1.15:8000"
+                  placeholderTextColor="#64748B"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+
+                <Text style={styles.presetsLabel}>Atalhos Rápidos:</Text>
+                <View style={styles.presetsContainer}>
+                  <TouchableOpacity
+                    style={styles.presetButton}
+                    onPress={() => setApiUrl('http://192.168.1.15:8000')}
+                  >
+                    <Text style={styles.presetButtonText}>Wi-Fi (192.168.1.15)</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.presetButton}
+                    onPress={() => setApiUrl('http://10.0.2.2:8000')}
+                  >
+                    <Text style={styles.presetButtonText}>Emulador Android (10.0.2.2)</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.presetButton}
+                    onPress={() => setApiUrl('http://localhost:8000')}
+                  >
+                    <Text style={styles.presetButtonText}>Localhost (8000)</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.testConnectionBtn}
+                  onPress={handleTestConnection}
+                  disabled={isTestingServer}
+                >
+                  {isTestingServer ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.testConnectionBtnText}>⚡ Testar Conectividade</Text>
+                  )}
                 </TouchableOpacity>
               </View>
-            </View>
-          ) : (
-            <TouchableOpacity style={styles.pickPhotoBtn} onPress={pickProfilePhoto}>
-              <Text style={styles.pickPhotoBtnText}>📷 Escolher Foto de Cadastro</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+            )}
+          </View>
 
-        {/* BOTÃO ÚNICO DE INICIAR */}
-        <View style={styles.bottomArea}>
-          <TouchableOpacity style={styles.startMainButton} onPress={handleStartPress}>
-            <Text style={styles.startMainButtonText}>INICIAR TESTE</Text>
-          </TouchableOpacity>
-        </View>
+          {/* BOTÃO ÚNICO DE INICIAR */}
+          <View style={styles.bottomArea}>
+            <TouchableOpacity style={styles.startMainButton} onPress={handleStartPress}>
+              <Text style={styles.startMainButtonText}>INICIAR TESTE</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -351,6 +458,9 @@ const styles = StyleSheet.create({
   startContainer: {
     flex: 1,
     backgroundColor: '#0F172A',
+  },
+  startScrollContent: {
+    flexGrow: 1,
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: 30,
@@ -358,7 +468,8 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: 'center',
-    marginTop: 20,
+    marginTop: 10,
+    marginBottom: 16,
   },
   appTitle: {
     fontSize: 28,
@@ -424,6 +535,99 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 16,
     fontWeight: '600',
+  },
+  serverConfigCard: {
+    backgroundColor: '#1E293B',
+    width: '100%',
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  serverConfigHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  serverConfigIcon: {
+    fontSize: 24,
+  },
+  serverConfigLabel: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  serverConfigValue: {
+    color: '#38BDF8',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginTop: 2,
+  },
+  serverToggleText: {
+    color: '#94A3B8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  serverConfigBody: {
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+  },
+  inputFieldLabel: {
+    color: '#E2E8F0',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  serverInput: {
+    backgroundColor: '#0F172A',
+    color: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#475569',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  presetsLabel: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginTop: 12,
+    marginBottom: 6,
+  },
+  presetsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 14,
+  },
+  presetButton: {
+    backgroundColor: '#334155',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  presetButtonText: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  testConnectionBtn: {
+    backgroundColor: '#0284C7',
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  testConnectionBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
   bottomArea: {
     width: '100%',
