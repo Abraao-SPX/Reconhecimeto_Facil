@@ -22,6 +22,7 @@
       ]
     ],
     "android": {
+      "package": "com.abraao.reconhecimentofacil",
       "adaptiveIcon": {
         "backgroundColor": "#0F172A",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -30,13 +31,20 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.WRITE_SETTINGS"
       ]
     },
     "ios": {
       "infoPlist": {
         "NSCameraUsageDescription": "A câmera é necessária para verificar sua identidade com segurança e evitar perfis falsos."
       }
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "a3ac5a95-b43a-4923-8cb2-74a459932ef0"
+      }
+    },
+    "owner": "abraao1098"
   }
 }

@@ -21,8 +21,8 @@ import * as Haptics from 'expo-haptics';
 import axios from 'axios';
 import { StatusBar } from 'expo-status-bar';
 
-// Endereço IP padrão: configurado com o IP real da sua máquina (192.168.1.44)
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.1.44:8000';
+// Endereço IP padrão: configurado com o túnel HTTPS Cloudflare da VPS Oracle
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://coated-meals-retained-ward.trycloudflare.com';
 
 type ScreenState = 'START' | 'LIVENESS' | 'PROCESSING' | 'SUCCESS' | 'FAILURE';
 
@@ -137,7 +137,10 @@ export default function App() {
     setIsTestingServer(true);
     const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
-      const res = await axios.get(`${cleanUrl}/health`, { timeout: 4000 });
+      const res = await axios.get(`${cleanUrl}/health`, {
+        timeout: 8000,
+        headers: { 'Bypass-Tunnel-Reminder': 'true' },
+      });
       if (res.data?.status === 'ok') {
         Alert.alert(
           'Servidor Online! ✅',
@@ -149,7 +152,7 @@ export default function App() {
     } catch (err: any) {
       Alert.alert(
         'Falha na Conexão ❌',
-        `Não foi possível conectar a:\n${cleanUrl}\n\nVerifique se o backend está rodando no Docker e se o celular está no mesmo Wi-Fi.`
+        `Não foi possível conectar a:\n${cleanUrl}\n\nDetalhes: ${err.message || 'Sem resposta do servidor'}`
       );
     } finally {
       setIsTestingServer(false);
@@ -215,7 +218,7 @@ export default function App() {
       if (!micPermission?.granted) {
         await requestMicPermission();
       }
-      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 5, mute: true });
+      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 5 });
 
       // Frame inicial neutro escuro (300ms)
       setBackgroundColor('#000000');
@@ -291,8 +294,11 @@ export default function App() {
       const response = await executeWithRetry(
         () =>
           axios.post(`${cleanUrl}/verify`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-            timeout: 45000,
+            headers: {
+              'Content-Type': 'multipart/form-data',
+              'Bypass-Tunnel-Reminder': 'true',
+            },
+            timeout: 60000,
           }),
         2,
         1500,
@@ -409,21 +415,27 @@ export default function App() {
                 <View style={styles.presetsContainer}>
                   <TouchableOpacity
                     style={styles.presetButton}
+                    onPress={() => setApiUrl('https://coated-meals-retained-ward.trycloudflare.com')}
+                  >
+                    <Text style={styles.presetButtonText}>🚀 Cloudflare HTTPS</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.presetButton}
+                    onPress={() => setApiUrl('http://132.226.242.158')}
+                  >
+                    <Text style={styles.presetButtonText}>🌐 VPS Porta 80</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.presetButton}
+                    onPress={() => setApiUrl('http://132.226.242.158:8000')}
+                  >
+                    <Text style={styles.presetButtonText}>🔌 VPS Porta 8000</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.presetButton}
                     onPress={() => setApiUrl('http://192.168.1.44:8000')}
                   >
-                    <Text style={styles.presetButtonText}>Wi-Fi (192.168.1.44)</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.presetButton}
-                    onPress={() => setApiUrl('http://10.0.2.2:8000')}
-                  >
-                    <Text style={styles.presetButtonText}>Emulador Android (10.0.2.2)</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.presetButton}
-                    onPress={() => setApiUrl('http://localhost:8000')}
-                  >
-                    <Text style={styles.presetButtonText}>Localhost (8000)</Text>
+                    <Text style={styles.presetButtonText}>💻 Wi-Fi Local (192.168.1.44)</Text>
                   </TouchableOpacity>
                 </View>
 
