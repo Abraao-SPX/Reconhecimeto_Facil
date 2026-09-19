@@ -8,15 +8,18 @@ import json
 import hmac
 import hashlib
 import base64
+import sqlite3
 import cv2
 import numpy as np
+from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Query
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="Reconhecimento Fácil - Microsserviço de Biometria & Prova de Vida",
     description="Microsserviço independente anti-spoofing com flash espectral de cores, YuNet, SFace, JWT e Rate Limiting",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # Habilita CORS para permitir chamadas diretas do React Native no celular
@@ -123,6 +126,16 @@ def registrar_auditoria(entry: dict):
     if len(AUDIT_LOGS) > MAX_AUDIT_LOGS:
         AUDIT_LOGS.pop(0)
 
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "Reconhecimento Fácil - Biometrics API",
+        "model": "YuNet-SFace",
+        "docs_url": "/docs",
+        "health_url": "/health"
+    }
+
 @app.get("/health")
 def health_check():
     return {
@@ -167,6 +180,73 @@ face_cascade = cv2.CascadeClassifier(FACE_CASCADE_PATH)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEBUG_DIR = os.path.join(BASE_DIR, "debug")
 os.makedirs(DEBUG_DIR, exist_ok=True)
+
+STORAGE_DIR = os.path.join(BASE_DIR, "storage")
+STORAGE_FACES_DIR = os.path.join(STORAGE_DIR, "faces")
+DB_PATH = os.path.join(STORAGE_DIR, "biometria.db")
+os.makedirs(STORAGE_FACES_DIR, exist_ok=True)
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            embedding TEXT NOT NULL,
+            photo_filename TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def db_salvar_usuario(user_id: str, name: str, embedding: np.ndarray, photo_filename: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    emb_json = json.dumps(embedding.tolist())
+    cursor.execute("""
+        INSERT OR REPLACE INTO users (id, name, embedding, photo_filename, created_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """, (user_id, name, emb_json, photo_filename))
+    conn.commit()
+    conn.close()
+
+def db_listar_usuarios():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, embedding, photo_filename, created_at FROM users ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    users = []
+    for r in rows:
+        users.append({
+            "id": r[0],
+            "name": r[1],
+            "embedding": np.array(json.loads(r[2]), dtype=np.float32),
+            "photo_filename": r[3],
+            "created_at": r[4]
+        })
+    return users
+
+def db_buscar_usuario(user_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, embedding, photo_filename, created_at FROM users WHERE id = ?", (user_id,))
+    r = cursor.fetchone()
+    conn.close()
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "name": r[1],
+        "embedding": np.array(json.loads(r[2]), dtype=np.float32),
+        "photo_filename": r[3],
+        "created_at": r[4]
+    }
+
 
 YUNET_PATH = os.getenv("YUNET_MODEL_PATH", os.path.join(BASE_DIR, "models", "face_detection_yunet_2023mar.onnx"))
 SFACE_PATH = os.getenv("SFACE_MODEL_PATH", os.path.join(BASE_DIR, "models", "face_recognition_sface_2021dec.onnx"))
@@ -218,6 +298,25 @@ def detectar_face_yunet(image: np.ndarray):
         best_face[:14] /= scale
 
     return best_face
+
+def extrair_embedding_e_recorte(frame: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Detecta face com YuNet e extrai vetor embedding SFace (128D) e recorte facial alinhado."""
+    if recognizer_sface is None or detector_yunet is None or frame is None:
+        return None, None
+    face_data = None
+    frame_final = frame
+    for rot in [None, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180]:
+        cand = cv2.rotate(frame, rot) if rot is not None else frame
+        f_data = detectar_face_yunet(cand)
+        if f_data is not None:
+            frame_final = cand
+            face_data = f_data
+            break
+    if face_data is None:
+        return None, None
+    aligned = recognizer_sface.alignCrop(frame_final, face_data)
+    feat = recognizer_sface.feature(aligned)
+    return feat, aligned
 
 def detectar_face_roi(frame: np.ndarray) -> tuple[int, int, int, int] | None:
     """
@@ -484,15 +583,147 @@ def validar_reflexo_delta_rgb(
 
     return False, f"Reflexo não compatível ({respostas_corretas}/{len(cores_esperadas)} cores validadas).", face_roi
 
+@app.post("/register")
+async def register_biometrics(
+    request: Request,
+    video: UploadFile = File(...),
+    name: str = Form(...),
+    user_id: Optional[str] = Form(None),
+    expected_colors: Optional[str] = Form(None)
+):
+    """
+    Cadastra a biometria facial de um novo usuário DIRETAMENTE AO VIVO via vídeo gravado da câmera.
+    Sem precisar de foto da galeria.
+    Valida a prova de vida se expected_colors for fornecido.
+    Extrai o frame mais nítido com Laplaciano, detecta e alinha a face com YuNet,
+    calcula o embedding de 128 dimensões com SFace e salva no SQLite e storage/faces.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    aplicar_rate_limit(client_ip)
+
+    name_clean = name.strip()
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="O nome do usuário é obrigatório.")
+
+    uid = user_id.strip() if user_id and user_id.strip() else f"user_{int(time.time())}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
+
+    temp_dir = tempfile.mkdtemp()
+    video_path = os.path.join(temp_dir, "register_video.mp4")
+
+    try:
+        with open(video_path, "wb") as f:
+            shutil.copyfileobj(video.file, f)
+
+        face_roi = None
+        if expected_colors and expected_colors.strip():
+            cores = [c.strip() for c in expected_colors.split(",") if c.strip()]
+            is_live, liveness_msg, face_roi = validar_reflexo_delta_rgb(video_path, cores)
+            if not is_live:
+                return {
+                    "success": False,
+                    "is_live": False,
+                    "reason": liveness_msg,
+                    "status": liveness_msg
+                }
+
+        # Seleciona o frame mais nítido
+        melhor_frame = selecionar_melhor_frame_nitido(video_path, max_frames=40, roi_box=face_roi)
+
+        # Extrai embedding e recorte facial alinhado com YuNet + SFace
+        feat, aligned_crop = extrair_embedding_e_recorte(melhor_frame)
+        if feat is None or aligned_crop is None:
+            return {
+                "success": False,
+                "is_live": True,
+                "reason": "Não foi possível identificar um rosto nítido e de frente. Mantenha o rosto centralizado e bem iluminado.",
+                "status": "Falha na detecção facial"
+            }
+
+        photo_filename = f"{uid}.jpg"
+        photo_full_path = os.path.join(STORAGE_FACES_DIR, photo_filename)
+        cv2.imwrite(photo_full_path, aligned_crop)
+
+        # Salva o usuário e o vetor biométrico no SQLite
+        db_salvar_usuario(uid, name_clean, feat, photo_filename)
+
+        registrar_auditoria({
+            "client_ip": client_ip,
+            "user_id": uid,
+            "action": "register",
+            "name": name_clean,
+            "success": True
+        })
+
+        return {
+            "success": True,
+            "user_id": uid,
+            "name": name_clean,
+            "photo_url": f"/faces/{photo_filename}",
+            "message": f"Biometria facial de {name_clean} cadastrada com sucesso!"
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+@app.get("/users")
+def list_registered_users():
+    """Retorna a lista de todos os usuários cadastrados no banco de biometria facial."""
+    users = db_listar_usuarios()
+    return {
+        "total": len(users),
+        "users": [
+            {
+                "id": u["id"],
+                "name": u["name"],
+                "photo_url": f"/faces/{u['photo_filename']}",
+                "created_at": u["created_at"]
+            }
+            for u in users
+        ]
+    }
+
+@app.get("/faces/{filename}")
+def get_face_photo(filename: str):
+    """Serve a foto facial salva no banco de dados biométrico."""
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(STORAGE_FACES_DIR, safe_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Foto biométrica não encontrada.")
+    return FileResponse(file_path, media_type="image/jpeg")
+
+@app.delete("/users/{user_id}")
+def delete_registered_user(user_id: str):
+    """Remove um usuário e sua foto biométrica do sistema."""
+    user = db_buscar_usuario(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    photo_path = os.path.join(STORAGE_FACES_DIR, user["photo_filename"])
+    if os.path.exists(photo_path):
+        try:
+            os.remove(photo_path)
+        except Exception:
+            pass
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": f"Usuário {user_id} excluído com sucesso."}
+
 @app.post("/verify")
 async def verify_identity(
     request: Request,
     video: UploadFile = File(...),
-    profile_photo: UploadFile = File(...),
     expected_colors: str = Form(...), # Ex: "VERMELHO,AZUL,VERDE"
-    user_id: str = Form("senior_user_anonymous")
+    profile_photo: Optional[UploadFile] = File(None),
+    user_id: Optional[str] = Form(None)
 ):
-    # 1. Proteção contra ataques automatizados (Rate Limiting de 5 req/min por IP)
+    """
+    Verificação biométrica ao vivo contra o banco de dados (1:N ou 1:1) ou foto de perfil.
+    NÃO exige foto da galeria quando o banco já possui usuários cadastrados.
+    """
     client_ip = request.client.host if request.client else "unknown"
     aplicar_rate_limit(client_ip)
 
@@ -500,22 +731,23 @@ async def verify_identity(
     temp_dir = tempfile.mkdtemp()
 
     video_path = os.path.join(temp_dir, "challenge_video.mp4")
-    profile_path = os.path.join(temp_dir, "profile_photo.jpg")
-    frame_extraido_path = os.path.join(temp_dir, "face_probe.jpg")
+    profile_path = os.path.join(temp_dir, "profile_photo.jpg") if profile_photo else None
 
     try:
-        # 1. Salva uploads em diretório temporário
+        # 1. Salva vídeo temporário
         with open(video_path, "wb") as f:
             shutil.copyfileobj(video.file, f)
-        with open(profile_path, "wb") as f:
-            shutil.copyfileobj(profile_photo.file, f)
 
-        # 2. ETAPA 1: Prova de Vida Ativa com ROI Dinâmica do Rosto
+        if profile_photo and profile_path:
+            with open(profile_path, "wb") as f:
+                shutil.copyfileobj(profile_photo.file, f)
+
+        # 2. ETAPA 1: Prova de Vida Ativa com reflexo espectral
         is_live, liveness_msg, face_roi = validar_reflexo_delta_rgb(video_path, cores)
         if not is_live:
             registrar_auditoria({
                 "client_ip": client_ip,
-                "user_id": user_id,
+                "user_id": user_id or "anonymous",
                 "verified": False,
                 "is_live": False,
                 "reason": liveness_msg
@@ -527,106 +759,106 @@ async def verify_identity(
                 "status": liveness_msg
             }
 
-        # 3. ETAPA 2: Seleção Inteligente do Frame com Maior Nitidez (Filtro Laplaciano)
+        # 3. ETAPA 2: Seleciona o melhor frame com maior nitidez (Laplaciano)
         melhor_frame = selecionar_melhor_frame_nitido(video_path, max_frames=40, roi_box=face_roi)
-        cv2.imwrite(frame_extraido_path, melhor_frame)
+        cv2.imwrite(os.path.join(DEBUG_DIR, "last_probe_frame.jpg"), melhor_frame)
 
-        # 4. ETAPA 3: Comparação Biométrica 1:1 com YuNet + SFace (e ArcFace como fallback)
+        # 4. Extrai embedding biométrico do vídeo ao vivo com YuNet + SFace
+        feat_probe, aligned_probe = extrair_embedding_e_recorte(melhor_frame)
+        if feat_probe is None or aligned_probe is None:
+            return {
+                "verified": False,
+                "is_live": True,
+                "reason": "Não foi possível isolar um rosto nítido na gravação. Mantenha o rosto estável e centralizado.",
+                "status": "Falha na detecção facial"
+            }
+
+        cv2.imwrite(os.path.join(DEBUG_DIR, "last_aligned_probe.jpg"), aligned_probe)
+
         verified = False
         distance = 1.0
-        threshold = 0.66
-        profile_img = cv2.imread(profile_path)
+        threshold = 0.35
+        matched_user = None
 
-        # Salva imagens recebidas para auditoria e depuração transparente
-        cv2.imwrite(os.path.join(DEBUG_DIR, "last_probe_frame.jpg"), melhor_frame)
-        if profile_img is not None:
-            cv2.imwrite(os.path.join(DEBUG_DIR, "last_profile_photo.jpg"), profile_img)
+        # CASO A: Comparação direta com foto enviada na requisição (modo legado)
+        if profile_path and os.path.exists(profile_path):
+            profile_img = cv2.imread(profile_path)
+            if profile_img is not None:
+                feat_profile, aligned_profile = extrair_embedding_e_recorte(profile_img)
+                if feat_profile is not None:
+                    similarity = float(recognizer_sface.match(feat_probe, feat_profile, cv2.FaceRecognizerSF_FR_COSINE))
+                    distance = max(0.0, 1.0 - similarity)
+                    verified = distance <= threshold
 
-        # Pipeline Primária de Alta Precisão (OpenBiometrics: YuNet + SFace com 5 marcos anatômicos)
-        if recognizer_sface is not None and detector_yunet is not None and profile_img is not None:
-            face_probe_data = None
-            probe_final = melhor_frame
-            for rot in [None, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE]:
-                cand = cv2.rotate(melhor_frame, rot) if rot is not None else melhor_frame
-                f_data = detectar_face_yunet(cand)
-                if f_data is not None:
-                    probe_final = cand
-                    face_probe_data = f_data
-                    break
+        # CASO B: Reconhecimento Facial ao vivo contra o Banco de Dados SQLite (sem foto de galeria!)
+        else:
+            # Subcaso B1: user_id especificado -> comparação 1:1
+            if user_id and user_id.strip():
+                alvo = db_buscar_usuario(user_id.strip())
+                if alvo is not None:
+                    similarity = float(recognizer_sface.match(feat_probe, alvo["embedding"], cv2.FaceRecognizerSF_FR_COSINE))
+                    distance = max(0.0, 1.0 - similarity)
+                    if distance <= threshold:
+                        verified = True
+                        matched_user = alvo
+                else:
+                    return {
+                        "verified": False,
+                        "is_live": True,
+                        "reason": f"Usuário '{user_id}' não encontrado no banco de dados.",
+                        "status": f"Usuário '{user_id}' não cadastrado."
+                    }
+            # Subcaso B2: reconhecimento 1:N contra todos os usuários cadastrados
+            else:
+                todos_usuarios = db_listar_usuarios()
+                if not todos_usuarios:
+                    return {
+                        "verified": False,
+                        "is_live": True,
+                        "reason": "Nenhum usuário cadastrado no sistema. Por favor, cadastre sua biometria primeiro.",
+                        "status": "Nenhum usuário cadastrado."
+                    }
 
-            face_profile_data = None
-            profile_final = profile_img
-            for rot in [None, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE]:
-                cand = cv2.rotate(profile_img, rot) if rot is not None else profile_img
-                f_data = detectar_face_yunet(cand)
-                if f_data is not None:
-                    profile_final = cand
-                    face_profile_data = f_data
-                    break
+                maior_similaridade = -1.0
+                melhor_candidato = None
+                for u in todos_usuarios:
+                    sim = float(recognizer_sface.match(feat_probe, u["embedding"], cv2.FaceRecognizerSF_FR_COSINE))
+                    if sim > maior_similaridade:
+                        maior_similaridade = sim
+                        melhor_candidato = u
 
-            if face_probe_data is not None and face_profile_data is not None:
-                aligned_probe = recognizer_sface.alignCrop(probe_final, face_probe_data)
-                feat_probe = recognizer_sface.feature(aligned_probe)
+                distance = max(0.0, 1.0 - maior_similaridade)
+                if distance <= threshold and melhor_candidato is not None:
+                    verified = True
+                    matched_user = melhor_candidato
 
-                aligned_profile = recognizer_sface.alignCrop(profile_final, face_profile_data)
-                feat_profile = recognizer_sface.feature(aligned_profile)
-
-                cv2.imwrite(os.path.join(DEBUG_DIR, "last_aligned_probe.jpg"), aligned_probe)
-                cv2.imwrite(os.path.join(DEBUG_DIR, "last_aligned_profile.jpg"), aligned_profile)
-
-                similarity = float(recognizer_sface.match(feat_probe, feat_profile, cv2.FaceRecognizerSF_FR_COSINE))
-                # Limiar rigoroso anti-fraude calibrado para 0.35:
-                # distance <= 0.35 -> Aprovado (Garante aprovação confiável da pessoa real mesmo com pequenas variações de expressão/luz)
-                # distance > 0.35 -> Reprovado (Rejeita fotos de terceiros, fotos na parede [que pontuam 0.58] ou telas)
-                distance = max(0.0, 1.0 - similarity)
-                threshold = 0.35
-                verified = distance <= threshold
-
-        # Fallback para ArcFace caso YuNet/SFace não tenham sido conclusivos
-        if not verified and distance == 1.0:
-            try:
-                from deepface import DeepFace
-                resultado = DeepFace.verify(
-                    img1_path=frame_extraido_path,
-                    img2_path=profile_path,
-                    model_name="ArcFace",
-                    detector_backend="opencv",
-                    distance_metric="cosine",
-                    enforce_detection=False
-                )
-                distance = float(resultado.get("distance", 1.0))
-                threshold = 0.35
-                verified = distance <= threshold
-            except Exception as ve:
-                erro_str = str(ve).lower()
-                msg_amigavel = "Não conseguimos identificar seu rosto claramente. Por favor, certifique-se de escolher uma foto nítida e bem iluminada."
-                registrar_auditoria({
-                    "client_ip": client_ip,
-                    "user_id": user_id,
-                    "verified": False,
-                    "is_live": True,
-                    "error": str(ve)
-                })
-                return {
-                    "verified": False,
-                    "is_live": True,
-                    "reason": msg_amigavel,
-                    "status": msg_amigavel
-                }
-
-        # 5. ETAPA 4: Geração de Token JWT Assinado
+        # 5. Geração de Token JWT assinado em caso de aprovação
         jwt_token = None
+        token_sub = matched_user["id"] if matched_user else (user_id or "senior_user_anonymous")
         if verified:
-            jwt_token = gerar_jwt_biometria(user_id, distance, threshold)
+            jwt_token = gerar_jwt_biometria(token_sub, distance, threshold)
 
         registrar_auditoria({
             "client_ip": client_ip,
-            "user_id": user_id,
+            "user_id": token_sub,
             "verified": verified,
             "is_live": True,
             "distance": round(distance, 4),
-            "reason": "Sucesso" if verified else "Distância acima do limiar"
+            "matched_name": matched_user["name"] if matched_user else None,
+            "reason": "Sucesso" if verified else "Rosto não reconhecido"
         })
+
+        resp_user = {
+            "id": matched_user["id"],
+            "name": matched_user["name"],
+            "photo_url": f"/faces/{matched_user['photo_filename']}"
+        } if matched_user else None
+
+        msg_status = (
+            f"Olá {matched_user['name']}! Reconhecimento facial aprovado com sucesso!"
+            if (verified and matched_user)
+            else ("Reconhecimento facial aprovado com sucesso!" if verified else "Rosto não reconhecido ou biometria não confere.")
+        )
 
         return {
             "verified": verified,
@@ -634,13 +866,14 @@ async def verify_identity(
             "distance": round(distance, 4),
             "threshold": threshold,
             "jwt_token": jwt_token,
-            "status": "Identidade confirmada com sucesso!" if verified else "Rosto não compatível com o perfil cadastrado."
+            "matched_user": resp_user,
+            "status": msg_status
         }
 
     except Exception as e:
         registrar_auditoria({
             "client_ip": client_ip,
-            "user_id": user_id,
+            "user_id": user_id or "anonymous",
             "verified": False,
             "is_live": False,
             "error": str(e)
@@ -648,4 +881,5 @@ async def verify_identity(
         return {"verified": False, "is_live": False, "error": str(e)}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
 

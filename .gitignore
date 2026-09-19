@@ -39,6 +39,8 @@ ENV/
 *.h5
 debug/
 backend/debug/
+storage/
+backend/storage/
 
 # Node / React Native / Expo
 node_modules/
