@@ -254,7 +254,7 @@ export default function App() {
       if (!micPermission?.granted) {
         await requestMicPermission();
       }
-      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 5 });
+      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 3 });
 
       // Frame inicial neutro escuro (300ms)
       setBackgroundColor('#000000');
@@ -264,7 +264,7 @@ export default function App() {
       for (const color of colors) {
         setBackgroundColor(COLOR_MAP[color] || '#FFFFFF');
         triggerHapticFeedback('impact');
-        await new Promise((r) => setTimeout(r, flash_duration_ms || 750));
+        await new Promise((r) => setTimeout(r, flash_duration_ms ? Math.min(flash_duration_ms, 500) : 500));
       }
 
       // 5. Finaliza gravação e restaura brilho
@@ -327,18 +327,19 @@ export default function App() {
         type: 'video/mp4',
       } as any);
 
+      setStatusMessage('Enviando vídeo para o servidor...');
+
       const response = await executeWithRetry(
         () =>
           axios.post(`${cleanUrl}/register`, formData, {
             headers: {
               'Content-Type': 'multipart/form-data',
-              'Bypass-Tunnel-Reminder': 'true',
             },
-            timeout: 60000,
+            timeout: 90000,
           }),
         2,
-        1500,
-        (att, tot) => setStatusMessage(`Salvando dados no servidor (${att}/${tot})...`)
+        2000,
+        (att, tot) => setStatusMessage(`Reenviando vídeo para o servidor (${att}/${tot})...`)
       );
 
       if (response.data.success) {
@@ -355,8 +356,17 @@ export default function App() {
         speakInstruction(failReason, voiceAssistance);
       }
     } catch (err: any) {
-      console.error(err);
-      const errDetail = err.response?.data?.detail || err.message || 'Erro de comunicação ao salvar biometria.';
+      console.error('Erro no registro:', err);
+      let errDetail = 'Erro de comunicação com o servidor.';
+      if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
+        errDetail = 'Falha na conexão de internet durante o envio do vídeo. Verifique se seu Wi-Fi ou 4G está estável e tente novamente.';
+      } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        errDetail = 'O envio do vídeo demorou demais. Verifique sua conexão e tente novamente.';
+      } else if (err.response?.data?.detail) {
+        errDetail = err.response.data.detail;
+      } else if (err.message) {
+        errDetail = err.message;
+      }
       setErrorMessage(errDetail);
       setScreenState('FAILURE');
       triggerHapticFeedback('error');
@@ -376,18 +386,19 @@ export default function App() {
         type: 'video/mp4',
       } as any);
 
+      setStatusMessage('Enviando vídeo para reconhecimento...');
+
       const response = await executeWithRetry(
         () =>
           axios.post(`${cleanUrl}/verify`, formData, {
             headers: {
               'Content-Type': 'multipart/form-data',
-              'Bypass-Tunnel-Reminder': 'true',
             },
-            timeout: 60000,
+            timeout: 90000,
           }),
         2,
-        1500,
-        (att, tot) => setStatusMessage(`Identificando rosto no servidor (${att}/${tot})...`)
+        2000,
+        (att, tot) => setStatusMessage(`Reenviando vídeo para o servidor (${att}/${tot})...`)
       );
 
       setVerificationData(response.data);
@@ -408,8 +419,17 @@ export default function App() {
         speakInstruction(failReason, voiceAssistance);
       }
     } catch (err: any) {
-      console.error(err);
-      const errDetail = err.response?.data?.detail || err.message || 'Erro de comunicação com o servidor.';
+      console.error('Erro na verificação:', err);
+      let errDetail = 'Erro de comunicação com o servidor.';
+      if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
+        errDetail = 'Falha na conexão de internet durante o envio do vídeo. Verifique se seu Wi-Fi ou 4G está estável e tente novamente.';
+      } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        errDetail = 'O envio do vídeo demorou demais. Verifique sua conexão e tente novamente.';
+      } else if (err.response?.data?.detail) {
+        errDetail = err.response.data.detail;
+      } else if (err.message) {
+        errDetail = err.message;
+      }
       setErrorMessage(errDetail);
       setScreenState('FAILURE');
       triggerHapticFeedback('error');
