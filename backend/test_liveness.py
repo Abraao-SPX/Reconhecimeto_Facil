@@ -135,10 +135,27 @@ def testar_algoritmo_delta_rgb():
                 os.remove(f)
         os.rmdir(temp_dir)
 
+def testar_minifasnet_bloqueio_tela_e_foto():
+    print("\n🧪 [4/4] Testando MiniFASNet V2 contra foto impressa e tela de monitor...")
+    from main import avaliar_liveness_minifasnet, net_minifasnet
+    if net_minifasnet is None:
+        print("  -> MiniFASNet não carregado no ambiente local de testes (pulando).")
+        return
+
+    # 1. Simula imagem plana (típica de tela ou cor sólida)
+    flat_frame = np.full((320, 240, 3), 128, dtype=np.uint8)
+    face_box = (50, 50, 100, 100)
+    is_real, score, reason, detalhes = avaliar_liveness_minifasnet(flat_frame, face_box)
+    print(f"  -> Teste tela plana: is_real={is_real}, motivo='{reason}', detalhes={detalhes}")
+    assert not is_real, "MiniFASNet deveria rejeitar imagem de tela plana"
+    assert "fraude detectada" in reason.lower() or "tela" in reason.lower()
+    print("  -> Bloqueio de tela/foto pelo MiniFASNet: PASSOU ✅")
+
 if __name__ == "__main__":
     testar_rejeicao_sem_rosto()
     testar_selecao_melhor_frame_laplaciano()
     testar_algoritmo_delta_rgb()
+    testar_minifasnet_bloqueio_tela_e_foto()
     print("\n🎉 Todos os testes unitários foram concluídos com 100% de sucesso!")
 
 

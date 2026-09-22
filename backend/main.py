@@ -138,11 +138,17 @@ def root():
 
 @app.get("/health")
 def health_check():
+    yunet_ok = detector_yunet is not None
+    sface_ok = recognizer_sface is not None
+    minifasnet_ok = net_minifasnet is not None
     return {
         "status": "ok",
         "service": "Reconhecimento Fácil - Biometrics API",
-        "model": "YuNet-SFace",
-        "version": "1.1.0"
+        "model": "YuNet-SFace + MiniFASNet-V2",
+        "anti_spoofing": "MiniFASNetV2" if minifasnet_ok else "disabled",
+        "yunet": yunet_ok,
+        "sface": sface_ok,
+        "version": "1.3.0"
     }
 
 @app.get("/challenge")
@@ -416,9 +422,11 @@ def db_buscar_historico_amostras(user_id: str, limit: int = 20):
 
 YUNET_PATH = os.getenv("YUNET_MODEL_PATH", os.path.join(BASE_DIR, "models", "face_detection_yunet_2023mar.onnx"))
 SFACE_PATH = os.getenv("SFACE_MODEL_PATH", os.path.join(BASE_DIR, "models", "face_recognition_sface_2021dec.onnx"))
+MINIFASNET_PATH = os.getenv("MINIFASNET_MODEL_PATH", os.path.join(BASE_DIR, "models", "MiniFASNetV2.onnx"))
 
 detector_yunet = None
 recognizer_sface = None
+net_minifasnet = None
 
 if os.path.exists(YUNET_PATH) and os.path.exists(SFACE_PATH):
     try:
@@ -437,6 +445,13 @@ if os.path.exists(YUNET_PATH) and os.path.exists(SFACE_PATH):
         print("INFO: Pipeline biométrico YuNet + SFace inicializado com sucesso!")
     except Exception as e:
         print(f"WARN: Falha ao carregar YuNet/SFace: {e}")
+
+if os.path.exists(MINIFASNET_PATH):
+    try:
+        net_minifasnet = cv2.dnn.readNet(MINIFASNET_PATH)
+        print("INFO: MiniFASNet V2 Anti-Spoofing inicializado com sucesso!")
+    except Exception as e:
+        print(f"WARN: Falha ao carregar MiniFASNet V2: {e}")
 
 def detectar_face_yunet(image: np.ndarray):
     """Detecta a face mais proeminente e seus 5 marcos anatômicos com YuNet."""
@@ -465,10 +480,10 @@ def detectar_face_yunet(image: np.ndarray):
 
     return best_face
 
-def extrair_embedding_e_recorte(frame: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Detecta face com YuNet e extrai vetor embedding SFace (128D) e recorte facial alinhado."""
+def extrair_face_completa(frame: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """Detecta face com YuNet e extrai (feat_128d, aligned_crop_112x112, frame_upright, face_data)."""
     if recognizer_sface is None or detector_yunet is None or frame is None:
-        return None, None
+        return None, None, None, None
     face_data = None
     frame_final = frame
     for rot in [None, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180]:
@@ -479,10 +494,115 @@ def extrair_embedding_e_recorte(frame: np.ndarray) -> tuple[Optional[np.ndarray]
             face_data = f_data
             break
     if face_data is None:
-        return None, None
+        return None, None, None, None
     aligned = recognizer_sface.alignCrop(frame_final, face_data)
     feat = recognizer_sface.feature(aligned)
+    return feat, aligned, frame_final, face_data
+
+def extrair_embedding_e_recorte(frame: np.ndarray) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Detecta face com YuNet e extrai vetor embedding SFace (128D) e recorte facial alinhado."""
+    feat, aligned, _, _ = extrair_face_completa(frame)
     return feat, aligned
+
+class MiniFASNetCropper:
+    """Implementação oficial do gerador de patches para MiniFASNet (Minivision AI)."""
+    @staticmethod
+    def _get_new_box(src_w: int, src_h: int, bbox, scale: float):
+        x = float(bbox[0])
+        y = float(bbox[1])
+        box_w = float(bbox[2])
+        box_h = float(bbox[3])
+
+        scale = min((src_h - 1) / max(1.0, box_h), min((src_w - 1) / max(1.0, box_w), scale))
+
+        new_width = box_w * scale
+        new_height = box_h * scale
+        center_x = box_w / 2.0 + x
+        center_y = box_h / 2.0 + y
+
+        left_top_x = center_x - new_width / 2.0
+        left_top_y = center_y - new_height / 2.0
+        right_bottom_x = center_x + new_width / 2.0
+        right_bottom_y = center_y + new_height / 2.0
+
+        if left_top_x < 0:
+            right_bottom_x -= left_top_x
+            left_top_x = 0
+
+        if left_top_y < 0:
+            right_bottom_y -= left_top_y
+            left_top_y = 0
+
+        if right_bottom_x > src_w - 1:
+            left_top_x -= right_bottom_x - src_w + 1
+            right_bottom_x = src_w - 1
+
+        if right_bottom_y > src_h - 1:
+            left_top_y -= right_bottom_y - src_h + 1
+            right_bottom_y = src_h - 1
+
+        return int(left_top_x), int(left_top_y), int(right_bottom_x), int(right_bottom_y)
+
+    @classmethod
+    def crop(cls, org_img: np.ndarray, bbox, scale: float = 2.7, out_w: int = 80, out_h: int = 80):
+        src_h, src_w = org_img.shape[:2]
+        x1, y1, x2, y2 = cls._get_new_box(src_w, src_h, bbox, scale)
+        crop_img = org_img[y1:y2 + 1, x1:x2 + 1]
+        if crop_img.size == 0:
+            return cv2.resize(org_img, (out_w, out_h))
+        return cv2.resize(crop_img, (out_w, out_h))
+
+def avaliar_liveness_minifasnet(
+    frame: np.ndarray,
+    face_box,
+    min_live_score: float = 0.80
+) -> tuple[bool, float, str, dict]:
+    """
+    Avalia a prova de vida passiva utilizando a rede neural profunda MiniFASNet V2.
+    Classifica ataques de apresentação:
+      - Classe 0: Print Attack (foto impressa em papel)
+      - Classe 1: Genuine Live (pele humana real ao vivo)
+      - Classe 2: Screen Replay Attack (tela de monitor, celular, tablet)
+    """
+    if net_minifasnet is None or frame is None or face_box is None:
+        return True, 1.0, "MiniFASNet desativado ou indisponível.", {"status": "skipped"}
+
+    try:
+        crop_img = MiniFASNetCropper.crop(frame, face_box, scale=2.7, out_w=80, out_h=80)
+        blob = cv2.dnn.blobFromImage(crop_img, scalefactor=1.0 / 255.0, size=(80, 80), swapRB=False)
+        net_minifasnet.setInput(blob)
+        logits = net_minifasnet.forward()[0]
+
+        # Softmax normalizado
+        exp_l = np.exp(logits - np.max(logits))
+        probs = exp_l / np.sum(exp_l)
+        prob_print = float(probs[0])
+        prob_live = float(probs[1])
+        prob_screen = float(probs[2])
+
+        pred_label = int(np.argmax(probs))
+        detalhes = {
+            "print_prob": round(prob_print, 4),
+            "live_prob": round(prob_live, 4),
+            "screen_prob": round(prob_screen, 4),
+            "predicted_label": pred_label
+        }
+
+        if pred_label == 2:
+            pct = prob_screen * 100
+            return False, prob_live, f"Tentativa de fraude detectada: apresentação em tela/monitor de computador ({pct:.1f}%).", detalhes
+        elif pred_label == 0:
+            pct = prob_print * 100
+            return False, prob_live, f"Tentativa de fraude detectada: foto impressa em papel identificada ({pct:.1f}%).", detalhes
+
+        if prob_live < min_live_score:
+            pct = prob_live * 100
+            return False, prob_live, f"Prova de vida inconclusiva (Score de autenticidade: {pct:.1f}% < {min_live_score * 100:.0f}%).", detalhes
+
+        return True, prob_live, "Pessoa real ao vivo autenticada.", detalhes
+    except Exception as e:
+        print(f"WARN: Erro durante inferência MiniFASNet: {e}")
+        return True, 1.0, f"Erro MiniFASNet: {e}", {"error": str(e)}
 
 def detectar_face_roi(frame: np.ndarray) -> tuple[int, int, int, int] | None:
     """
@@ -729,16 +849,24 @@ def validar_reflexo_delta_rgb(
             delta_g = (g_atual - g_base) / g_base
             delta_b = (b_atual - b_base) / b_base
 
+            diff_r = r_atual - r_base
+            diff_g = g_atual - g_base
+            diff_b = b_atual - b_base
+
             # Exige que o canal da cor esperada domine os outros canais em pelo menos 10%
-            if cor_esperada == "VERMELHO" and (delta_r > delta_g * 1.10 and delta_r > delta_b * 1.10):
-                cor_validada = True
-                break
-            elif cor_esperada == "AZUL" and (delta_b > delta_r * 1.10 and delta_b > delta_g * 1.10):
-                cor_validada = True
-                break
-            elif cor_esperada == "VERDE" and (delta_g > delta_r * 1.10 and delta_g > delta_b * 1.10):
-                cor_validada = True
-                break
+            # e apresente um ganho de luz real (evitando reflexos espúrios em telas de computador)
+            if cor_esperada == "VERMELHO":
+                if delta_r > max(delta_g, delta_b) * 1.10 and (delta_r > 0.04 or diff_r > 2.0):
+                    cor_validada = True
+                    break
+            elif cor_esperada == "AZUL":
+                if delta_b > max(delta_r, delta_g) * 1.10 and (delta_b > 0.04 or diff_b > 2.0):
+                    cor_validada = True
+                    break
+            elif cor_esperada == "VERDE":
+                if delta_g > max(delta_r, delta_b) * 1.10 and (delta_g > 0.04 or diff_g > 2.0):
+                    cor_validada = True
+                    break
 
         if cor_validada:
             respostas_corretas += 1
@@ -821,13 +949,33 @@ async def register_biometrics(
         melhor_frame = selecionar_melhor_frame_nitido(video_path, max_frames=40, roi_box=face_roi)
 
         # Extrai embedding e recorte facial alinhado com YuNet + SFace
-        feat, aligned_crop = extrair_embedding_e_recorte(melhor_frame)
-        if feat is None or aligned_crop is None:
+        feat, aligned_crop, upright_frame, face_data = extrair_face_completa(melhor_frame)
+        if feat is None or aligned_crop is None or face_data is None:
             return {
                 "success": False,
                 "is_live": True,
                 "reason": "Não foi possível identificar um rosto nítido e de frente. Mantenha o rosto centralizado e bem iluminado.",
                 "status": "Falha na detecção facial"
+            }
+
+        # Validação Anti-Spoofing profunda com MiniFASNet V2 (bloqueio categórico de telas de PC e fotos impressas)
+        is_real, fas_score, fas_reason, fas_detalhes = avaliar_liveness_minifasnet(upright_frame, face_data[:4], min_live_score=0.80)
+        if not is_real:
+            registrar_auditoria({
+                "client_ip": client_ip,
+                "action": "register",
+                "name": name_clean,
+                "success": False,
+                "fraud_detected": True,
+                "reason": fas_reason,
+                "details": fas_detalhes
+            })
+            return {
+                "success": False,
+                "is_live": False,
+                "reason": fas_reason,
+                "status": "Fraude Biométrica Detectada",
+                "anti_spoofing": fas_detalhes
             }
 
         photo_filename = f"{uid}_anchor.jpg"
@@ -980,13 +1128,33 @@ async def verify_identity(
         cv2.imwrite(os.path.join(DEBUG_DIR, "last_probe_frame.jpg"), melhor_frame)
 
         # 4. Extrai embedding biométrico do vídeo ao vivo com YuNet + SFace
-        feat_probe, aligned_probe = extrair_embedding_e_recorte(melhor_frame)
-        if feat_probe is None or aligned_probe is None:
+        feat_probe, aligned_probe, upright_probe, face_data_probe = extrair_face_completa(melhor_frame)
+        if feat_probe is None or aligned_probe is None or face_data_probe is None:
             return {
                 "verified": False,
                 "is_live": True,
                 "reason": "Não foi possível isolar um rosto nítido na gravação. Mantenha o rosto estável e centralizado.",
                 "status": "Falha na detecção facial"
+            }
+
+        # Validação Anti-Spoofing profunda com MiniFASNet V2 (bloqueio categórico de telas de PC e fotos impressas)
+        is_real, fas_score, fas_reason, fas_detalhes = avaliar_liveness_minifasnet(upright_probe, face_data_probe[:4], min_live_score=0.80)
+        if not is_real:
+            registrar_auditoria({
+                "client_ip": client_ip,
+                "user_id": user_id or "anonymous",
+                "verified": False,
+                "is_live": False,
+                "fraud_detected": True,
+                "reason": fas_reason,
+                "details": fas_detalhes
+            })
+            return {
+                "verified": False,
+                "is_live": False,
+                "reason": fas_reason,
+                "status": "Fraude Biométrica Detectada",
+                "anti_spoofing": fas_detalhes
             }
 
         cv2.imwrite(os.path.join(DEBUG_DIR, "last_aligned_probe.jpg"), aligned_probe)
