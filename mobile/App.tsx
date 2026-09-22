@@ -97,6 +97,42 @@ async function executeWithRetry<T>(
   throw new Error('Falha na comunicação após múltiplas tentativas.');
 }
 
+// Upload multipart confiável usando fetch nativo do React Native (sem conflito de boundary do OkHttp)
+async function postMultipartWithFetch(
+  url: string,
+  formData: FormData,
+  timeoutMs: number = 90000
+): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      body: formData,
+      headers: {
+        'Accept': 'application/json',
+        // Não defina Content-Type manualmente: o React Native e o OkHttp inserem
+        // 'multipart/form-data; boundary=...' automaticamente.
+      },
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let data: any = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
+    if (!response.ok) {
+      const msg = data.detail || data.reason || `Servidor retornou código ${response.status}`;
+      throw new Error(msg);
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export default function App() {
   const [screenState, setScreenState] = useState<ScreenState>('START');
   const [actionMode, setActionMode] = useState<ActionMode>('VERIFY');
@@ -254,10 +290,7 @@ export default function App() {
       triggerHapticFeedback('impact');
 
       // 3. Inicia gravação de vídeo pela câmera frontal
-      if (!micPermission?.granted) {
-        await requestMicPermission();
-      }
-      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 3 });
+      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 4 });
 
       // Frame inicial neutro escuro (300ms)
       setBackgroundColor('#000000');
@@ -272,6 +305,7 @@ export default function App() {
 
       // 5. Finaliza gravação e restaura brilho
       setBackgroundColor('#000000');
+      await new Promise((r) => setTimeout(r, 300));
       cameraRef.current?.stopRecording();
       const videoData = await recordPromise;
 
@@ -332,27 +366,21 @@ export default function App() {
 
       setStatusMessage('Enviando vídeo para o servidor...');
 
-      const response = await executeWithRetry(
-        () =>
-          axios.post(`${cleanUrl}/register`, formData, {
-            headers: {
-              'Content-Type': 'multipart/form-data',
-            },
-            timeout: 90000,
-          }),
+      const data = await executeWithRetry(
+        () => postMultipartWithFetch(`${cleanUrl}/register`, formData, 90000),
         2,
         2000,
         (att, tot) => setStatusMessage(`Reenviando vídeo para o servidor (${att}/${tot})...`)
       );
 
-      if (response.data.success) {
-        setRegistrationData(response.data);
+      if (data.success) {
+        setRegistrationData(data);
         setScreenState('REGISTER_SUCCESS');
         triggerHapticFeedback('success');
         speakInstruction(`Biometria de ${userName} cadastrada com sucesso!`, voiceAssistance);
         fetchRegisteredUsers();
       } else {
-        const failReason = response.data.reason || response.data.error || 'Falha ao cadastrar a biometria facial.';
+        const failReason = data.reason || data.error || 'Falha ao cadastrar a biometria facial.';
         setErrorMessage(failReason);
         setScreenState('FAILURE');
         triggerHapticFeedback('error');
@@ -361,12 +389,8 @@ export default function App() {
     } catch (err: any) {
       console.error('Erro no registro:', err);
       let errDetail = 'Erro de comunicação com o servidor.';
-      if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
-        errDetail = 'Falha na conexão de internet durante o envio do vídeo. Verifique se seu Wi-Fi ou 4G está estável e tente novamente.';
-      } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+      if (err.name === 'AbortError' || err.message?.includes('aborted') || err.message?.includes('timeout')) {
         errDetail = 'O envio do vídeo demorou demais. Verifique sua conexão e tente novamente.';
-      } else if (err.response?.data?.detail) {
-        errDetail = err.response.data.detail;
       } else if (err.message) {
         errDetail = err.message;
       }
@@ -391,30 +415,24 @@ export default function App() {
 
       setStatusMessage('Enviando vídeo para reconhecimento...');
 
-      const response = await executeWithRetry(
-        () =>
-          axios.post(`${cleanUrl}/verify`, formData, {
-            headers: {
-              'Content-Type': 'multipart/form-data',
-            },
-            timeout: 90000,
-          }),
+      const data = await executeWithRetry(
+        () => postMultipartWithFetch(`${cleanUrl}/verify`, formData, 90000),
         2,
         2000,
         (att, tot) => setStatusMessage(`Reenviando vídeo para o servidor (${att}/${tot})...`)
       );
 
-      setVerificationData(response.data);
+      setVerificationData(data);
 
-      if (response.data.verified) {
+      if (data.verified) {
         setScreenState('SUCCESS');
         triggerHapticFeedback('success');
-        const nome = response.data.matched_user?.name || 'Usuário';
+        const nome = data.matched_user?.name || 'Usuário';
         speakInstruction(`Identidade confirmada com sucesso! Olá, ${nome}.`, voiceAssistance);
       } else {
         const failReason =
-          response.data.reason ||
-          response.data.status ||
+          data.reason ||
+          data.status ||
           'Rosto não reconhecido ou não cadastrado no sistema.';
         setErrorMessage(failReason);
         setScreenState('FAILURE');
@@ -424,12 +442,8 @@ export default function App() {
     } catch (err: any) {
       console.error('Erro na verificação:', err);
       let errDetail = 'Erro de comunicação com o servidor.';
-      if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
-        errDetail = 'Falha na conexão de internet durante o envio do vídeo. Verifique se seu Wi-Fi ou 4G está estável e tente novamente.';
-      } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+      if (err.name === 'AbortError' || err.message?.includes('aborted') || err.message?.includes('timeout')) {
         errDetail = 'O envio do vídeo demorou demais. Verifique sua conexão e tente novamente.';
-      } else if (err.response?.data?.detail) {
-        errDetail = err.response.data.detail;
       } else if (err.message) {
         errDetail = err.message;
       }
@@ -688,6 +702,7 @@ export default function App() {
             style={styles.cameraView}
             facing="front"
             mode="video"
+            mute={true}
           />
           {backgroundColor !== '#000000' && (
             <View
