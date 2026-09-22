@@ -30,7 +30,10 @@ interface RegisteredUser {
   id: string;
   name: string;
   photo_url: string;
+  latest_photo_url?: string;
+  samples_count?: number;
   created_at: string;
+  updated_at?: string;
 }
 
 const COLOR_MAP: Record<string, string> = {
@@ -554,7 +557,9 @@ export default function App() {
                       />
                       <View style={{ flex: 1, marginLeft: 12 }}>
                         <Text style={styles.userItemName}>{u.name}</Text>
-                        <Text style={styles.userItemId}>ID: {u.id}</Text>
+                        <Text style={styles.userItemId}>
+                          🧠 {u.samples_count || 1} amostra{(u.samples_count || 1) > 1 ? 's' : ''} aprendida{(u.samples_count || 1) > 1 ? 's' : ''} • ID: {u.id.substring(0, 10)}...
+                        </Text>
                       </View>
                       <TouchableOpacity
                         style={styles.deleteUserBtn}
@@ -812,6 +817,11 @@ export default function App() {
             <Text style={styles.detailItem}>
               {matched ? `✅ Pessoa Reconhecida: ${matched.name}` : '✅ Rosto Compatível'}
             </Text>
+            {verificationData?.samples_count !== undefined && (
+              <Text style={styles.detailItem}>
+                🧠 Perfil Adaptativo: {verificationData.samples_count} amostra{verificationData.samples_count > 1 ? 's' : ''} aprendida{verificationData.samples_count > 1 ? 's' : ''}
+              </Text>
+            )}
             {verificationData?.distance !== undefined && (
               <Text style={styles.distanceText}>
                 Distância Biométrica: {verificationData.distance} (Limite: {verificationData.threshold})

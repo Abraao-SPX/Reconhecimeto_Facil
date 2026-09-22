@@ -170,12 +170,17 @@ def get_audit_logs(limit: int = Query(50, ge=1, le=200)):
     """Retorna os registros de auditoria mais recentes para análise antifraude."""
     return {"total": len(AUDIT_LOGS), "logs": AUDIT_LOGS[-limit:]}
 
-# Inicializa detector Haar Cascade nativo do OpenCV para detecção de face no baseline
-FACE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-face_cascade = cv2.CascadeClassifier(FACE_CASCADE_PATH)
+# Inicializa detector Haar Cascade nativo do OpenCV para detecção de face no baseline (fallback seguro)
+face_cascade = None
+try:
+    if hasattr(cv2, "data") and hasattr(cv2, "CascadeClassifier"):
+        FACE_CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(FACE_CASCADE_PATH)
+except Exception:
+    face_cascade = None
 
 # ==============================================================================
-# BIOMETRIA FACIAL OPENBIOMETRICS (YUNET + SFACE) - RECONHECIMENTO FÁCIL
+# BIOMETRIA FACIAL ADAPTATIVA (YUNET + SFACE) - RECONHECIMENTO FÁCIL
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEBUG_DIR = os.path.join(BASE_DIR, "debug")
@@ -193,9 +198,39 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            embedding TEXT NOT NULL,
+            primary_embedding TEXT NOT NULL,
+            centroid_embedding TEXT NOT NULL,
+            samples_count INTEGER DEFAULT 1,
             photo_filename TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            latest_photo_filename TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            embedding TEXT
+        )
+    """)
+    # Migração transparente se a tabela users já existir com formato legado
+    cursor.execute("PRAGMA table_info(users)")
+    cols = [c[1] for c in cursor.fetchall()]
+    if "embedding" in cols and "primary_embedding" not in cols:
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN primary_embedding TEXT")
+            cursor.execute("ALTER TABLE users ADD COLUMN centroid_embedding TEXT")
+            cursor.execute("ALTER TABLE users ADD COLUMN samples_count INTEGER DEFAULT 1")
+            cursor.execute("ALTER TABLE users ADD COLUMN latest_photo_filename TEXT")
+            cursor.execute("ALTER TABLE users ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            cursor.execute("UPDATE users SET primary_embedding = embedding, centroid_embedding = embedding, latest_photo_filename = photo_filename WHERE primary_embedding IS NULL")
+        except Exception:
+            pass
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS biometric_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            embedding TEXT NOT NULL,
+            sample_type TEXT NOT NULL,
+            distance_to_anchor REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
     conn.commit()
@@ -203,21 +238,118 @@ def init_db():
 
 init_db()
 
-def db_salvar_usuario(user_id: str, name: str, embedding: np.ndarray, photo_filename: str):
+def normalizar_embedding(emb: np.ndarray) -> np.ndarray:
+    """Normaliza o vetor embedding para norma unitária (L2 = 1.0)."""
+    emb_f = emb.astype(np.float32)
+    norm = np.linalg.norm(emb_f)
+    if norm > 1e-6:
+        return emb_f / norm
+    return emb_f
+
+def db_salvar_usuario_inicial(user_id: str, name: str, embedding: np.ndarray, photo_filename: str):
+    """
+    Cadastra o usuário inicial sem comparação com outros rostos.
+    Guarda o vetor biométrico como a Âncora Primária e Centroide inicial (samples_count = 1).
+    Registra também a primeira amostra no histórico biometric_samples.
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    emb_json = json.dumps(embedding.tolist())
+    emb_norm = normalizar_embedding(embedding)
+    emb_json = json.dumps(emb_norm.tolist())
+
+    cursor.execute("PRAGMA table_info(users)")
+    cols = [c[1] for c in cursor.fetchall()]
+
+    if "embedding" in cols:
+        cursor.execute("""
+            INSERT OR REPLACE INTO users (
+                id, name, primary_embedding, centroid_embedding, samples_count,
+                photo_filename, latest_photo_filename, created_at, updated_at, embedding
+            ) VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+        """, (user_id, name, emb_json, emb_json, photo_filename, photo_filename, emb_json))
+    else:
+        cursor.execute("""
+            INSERT OR REPLACE INTO users (
+                id, name, primary_embedding, centroid_embedding, samples_count,
+                photo_filename, latest_photo_filename, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, (user_id, name, emb_json, emb_json, photo_filename, photo_filename))
+
     cursor.execute("""
-        INSERT OR REPLACE INTO users (id, name, embedding, photo_filename, created_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, (user_id, name, emb_json, photo_filename))
+        INSERT INTO biometric_samples (user_id, embedding, sample_type, distance_to_anchor, created_at)
+        VALUES (?, ?, 'registration', 0.0, CURRENT_TIMESTAMP)
+    """, (user_id, emb_json))
+
     conn.commit()
     conn.close()
+
+def db_adicionar_amostra_login(user_id: str, new_embedding: np.ndarray, latest_photo_filename: str, distance_to_anchor: float) -> int:
+    """
+    Aprendizado contínuo: atualiza o perfil biométrico do usuário após cada login aprovado.
+    Calcula o novo centroide ponderado normalizado L2 e persiste no histórico.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT centroid_embedding, samples_count FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return 1
+
+    old_centroid = np.array(json.loads(row[0]), dtype=np.float32)
+    old_count = int(row[1]) if row[1] else 1
+
+    new_emb_norm = normalizar_embedding(new_embedding)
+    new_count = old_count + 1
+
+    # Atualização ponderada cumulativa: Centroid_novo = (Centroid_antigo * N + novo_vetor) / (N + 1)
+    updated_centroid = (old_centroid * float(old_count) + new_emb_norm) / float(new_count)
+    updated_centroid = normalizar_embedding(updated_centroid)
+
+    emb_json = json.dumps(new_emb_norm.tolist())
+    centroid_json = json.dumps(updated_centroid.tolist())
+
+    cursor.execute("""
+        INSERT INTO biometric_samples (user_id, embedding, sample_type, distance_to_anchor, created_at)
+        VALUES (?, ?, 'login_adaptation', ?, CURRENT_TIMESTAMP)
+    """, (user_id, emb_json, round(distance_to_anchor, 4)))
+
+    cursor.execute("PRAGMA table_info(users)")
+    cols = [c[1] for c in cursor.fetchall()]
+
+    if "embedding" in cols:
+        cursor.execute("""
+            UPDATE users
+            SET centroid_embedding = ?,
+                embedding = ?,
+                samples_count = ?,
+                latest_photo_filename = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (centroid_json, centroid_json, new_count, latest_photo_filename, user_id))
+    else:
+        cursor.execute("""
+            UPDATE users
+            SET centroid_embedding = ?,
+                samples_count = ?,
+                latest_photo_filename = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (centroid_json, new_count, latest_photo_filename, user_id))
+
+    conn.commit()
+    conn.close()
+    return new_count
 
 def db_listar_usuarios():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, embedding, photo_filename, created_at FROM users ORDER BY created_at DESC")
+    cursor.execute("""
+        SELECT id, name, primary_embedding, centroid_embedding, samples_count,
+               photo_filename, latest_photo_filename, created_at, updated_at
+        FROM users ORDER BY updated_at DESC
+    """)
     rows = cursor.fetchall()
     conn.close()
     users = []
@@ -225,16 +357,24 @@ def db_listar_usuarios():
         users.append({
             "id": r[0],
             "name": r[1],
-            "embedding": np.array(json.loads(r[2]), dtype=np.float32),
-            "photo_filename": r[3],
-            "created_at": r[4]
+            "primary_embedding": np.array(json.loads(r[2]), dtype=np.float32),
+            "centroid_embedding": np.array(json.loads(r[3]), dtype=np.float32),
+            "samples_count": r[4] or 1,
+            "photo_filename": r[5],
+            "latest_photo_filename": r[6] or r[5],
+            "created_at": r[7],
+            "updated_at": r[8]
         })
     return users
 
 def db_buscar_usuario(user_id: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, embedding, photo_filename, created_at FROM users WHERE id = ?", (user_id,))
+    cursor.execute("""
+        SELECT id, name, primary_embedding, centroid_embedding, samples_count,
+               photo_filename, latest_photo_filename, created_at, updated_at
+        FROM users WHERE id = ?
+    """, (user_id,))
     r = cursor.fetchone()
     conn.close()
     if not r:
@@ -242,10 +382,36 @@ def db_buscar_usuario(user_id: str):
     return {
         "id": r[0],
         "name": r[1],
-        "embedding": np.array(json.loads(r[2]), dtype=np.float32),
-        "photo_filename": r[3],
-        "created_at": r[4]
+        "primary_embedding": np.array(json.loads(r[2]), dtype=np.float32),
+        "centroid_embedding": np.array(json.loads(r[3]), dtype=np.float32),
+        "samples_count": r[4] or 1,
+        "photo_filename": r[5],
+        "latest_photo_filename": r[6] or r[5],
+        "created_at": r[7],
+        "updated_at": r[8]
     }
+
+def db_buscar_historico_amostras(user_id: str, limit: int = 20):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, sample_type, distance_to_anchor, created_at
+        FROM biometric_samples
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+    """, (user_id, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {
+            "id": r[0],
+            "sample_type": r[1],
+            "distance_to_anchor": r[2],
+            "created_at": r[3]
+        }
+        for r in rows
+    ]
 
 
 YUNET_PATH = os.getenv("YUNET_MODEL_PATH", os.path.join(BASE_DIR, "models", "face_detection_yunet_2023mar.onnx"))
@@ -333,22 +499,23 @@ def detectar_face_roi(frame: np.ndarray) -> tuple[int, int, int, int] | None:
             y2 = min(frame.shape[0], y + int(h * 0.70))
             return x1, y1, x2, y2
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=4,
-        minSize=(50, 50)
-    )
-    if len(faces) == 0:
-        return None
+    if face_cascade is not None:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=4,
+            minSize=(50, 50)
+        )
+        if len(faces) > 0:
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+            x1 = x + int(w * 0.20)
+            x2 = x + int(w * 0.80)
+            y1 = y + int(h * 0.15)
+            y2 = y + int(h * 0.70)
+            return x1, y1, x2, y2
 
-    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-    x1 = x + int(w * 0.20)
-    x2 = x + int(w * 0.80)
-    y1 = y + int(h * 0.15)
-    y2 = y + int(h * 0.70)
-    return x1, y1, x2, y2
+    return None
 
 def detectar_face_com_rotacao(frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int] | None, int | None]:
     """
@@ -583,6 +750,30 @@ def validar_reflexo_delta_rgb(
 
     return False, f"Reflexo não compatível ({respostas_corretas}/{len(cores_esperadas)} cores validadas).", face_roi
 
+def calcular_distancia_usuario(probe_embedding: np.ndarray, user: dict) -> float:
+    """
+    Compara o embedding ao vivo do login contra o perfil biométrico completo:
+    1. Distância contra a Âncora Primária do cadastro (d_anchor).
+    2. Distância contra o Centroide Adaptativo consolidado (d_centroid).
+    Retorna a menor distância encontrada (quanto menor, mais próximo).
+    """
+    if recognizer_sface is None or probe_embedding is None:
+        return 1.0
+
+    p_norm = normalizar_embedding(probe_embedding)
+
+    # 1. Distância para âncora inicial
+    anchor = user.get("primary_embedding")
+    sim_anchor = float(recognizer_sface.match(p_norm, anchor, cv2.FaceRecognizerSF_FR_COSINE)) if anchor is not None else -1.0
+    dist_anchor = max(0.0, 1.0 - sim_anchor)
+
+    # 2. Distância para o centroide adaptativo
+    centroid = user.get("centroid_embedding")
+    sim_centroid = float(recognizer_sface.match(p_norm, centroid, cv2.FaceRecognizerSF_FR_COSINE)) if centroid is not None else -1.0
+    dist_centroid = max(0.0, 1.0 - sim_centroid)
+
+    return min(dist_anchor, dist_centroid)
+
 @app.post("/register")
 async def register_biometrics(
     request: Request,
@@ -639,18 +830,19 @@ async def register_biometrics(
                 "status": "Falha na detecção facial"
             }
 
-        photo_filename = f"{uid}.jpg"
+        photo_filename = f"{uid}_anchor.jpg"
         photo_full_path = os.path.join(STORAGE_FACES_DIR, photo_filename)
         cv2.imwrite(photo_full_path, aligned_crop)
 
-        # Salva o usuário e o vetor biométrico no SQLite
-        db_salvar_usuario(uid, name_clean, feat, photo_filename)
+        # Salva o usuário com a primeira amostra no SQLite (sem comparação prévia)
+        db_salvar_usuario_inicial(uid, name_clean, feat, photo_filename)
 
         registrar_auditoria({
             "client_ip": client_ip,
             "user_id": uid,
             "action": "register",
             "name": name_clean,
+            "samples_count": 1,
             "success": True
         })
 
@@ -659,7 +851,8 @@ async def register_biometrics(
             "user_id": uid,
             "name": name_clean,
             "photo_url": f"/faces/{photo_filename}",
-            "message": f"Biometria facial de {name_clean} cadastrada com sucesso!"
+            "samples_count": 1,
+            "message": f"Biometria facial de {name_clean} cadastrada com sucesso! Primeira amostra âncora armazenada."
         }
 
     except Exception as e:
@@ -669,7 +862,7 @@ async def register_biometrics(
 
 @app.get("/users")
 def list_registered_users():
-    """Retorna a lista de todos os usuários cadastrados no banco de biometria facial."""
+    """Retorna a lista de todos os usuários cadastrados com suas contagens de amostras aprendidas."""
     users = db_listar_usuarios()
     return {
         "total": len(users),
@@ -677,11 +870,30 @@ def list_registered_users():
             {
                 "id": u["id"],
                 "name": u["name"],
+                "samples_count": u["samples_count"],
                 "photo_url": f"/faces/{u['photo_filename']}",
-                "created_at": u["created_at"]
+                "latest_photo_url": f"/faces/{u['latest_photo_filename']}",
+                "created_at": u["created_at"],
+                "updated_at": u["updated_at"]
             }
             for u in users
         ]
+    }
+
+@app.get("/users/{user_id}/history")
+def get_user_biometric_history(user_id: str):
+    """Retorna o histórico de amostras biométricas aprendidas nos logins do usuário."""
+    user = db_buscar_usuario(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    history = db_buscar_historico_amostras(user_id)
+    return {
+        "user_id": user["id"],
+        "name": user["name"],
+        "samples_count": user["samples_count"],
+        "created_at": user["created_at"],
+        "updated_at": user["updated_at"],
+        "history": history
     }
 
 @app.get("/faces/{filename}")
@@ -695,22 +907,26 @@ def get_face_photo(filename: str):
 
 @app.delete("/users/{user_id}")
 def delete_registered_user(user_id: str):
-    """Remove um usuário e sua foto biométrica do sistema."""
+    """Remove um usuário, suas fotos biométricas e seu histórico de amostras."""
     user = db_buscar_usuario(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    photo_path = os.path.join(STORAGE_FACES_DIR, user["photo_filename"])
-    if os.path.exists(photo_path):
-        try:
-            os.remove(photo_path)
-        except Exception:
-            pass
+    for p_key in ["photo_filename", "latest_photo_filename"]:
+        p_name = user.get(p_key)
+        if p_name:
+            photo_path = os.path.join(STORAGE_FACES_DIR, p_name)
+            if os.path.exists(photo_path):
+                try:
+                    os.remove(photo_path)
+                except Exception:
+                    pass
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM biometric_samples WHERE user_id = ?", (user_id,))
     cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
     conn.close()
-    return {"success": True, "message": f"Usuário {user_id} excluído com sucesso."}
+    return {"success": True, "message": f"Usuário {user_id} e histórico biométrico excluídos com sucesso."}
 
 @app.post("/verify")
 async def verify_identity(
@@ -790,14 +1006,13 @@ async def verify_identity(
                     distance = max(0.0, 1.0 - similarity)
                     verified = distance <= threshold
 
-        # CASO B: Reconhecimento Facial ao vivo contra o Banco de Dados SQLite (sem foto de galeria!)
+        # CASO B: Reconhecimento Facial ao vivo com Aprendizado Adaptativo (sem foto de galeria!)
         else:
-            # Subcaso B1: user_id especificado -> comparação 1:1
+            # Subcaso B1: user_id especificado -> comparação 1:1 contra o perfil adaptativo
             if user_id and user_id.strip():
                 alvo = db_buscar_usuario(user_id.strip())
                 if alvo is not None:
-                    similarity = float(recognizer_sface.match(feat_probe, alvo["embedding"], cv2.FaceRecognizerSF_FR_COSINE))
-                    distance = max(0.0, 1.0 - similarity)
+                    distance = calcular_distancia_usuario(feat_probe, alvo)
                     if distance <= threshold:
                         verified = True
                         matched_user = alvo
@@ -808,29 +1023,51 @@ async def verify_identity(
                         "reason": f"Usuário '{user_id}' não encontrado no banco de dados.",
                         "status": f"Usuário '{user_id}' não cadastrado."
                     }
-            # Subcaso B2: reconhecimento 1:N contra todos os usuários cadastrados
+            # Subcaso B2: reconhecimento 1:N contra todos os perfis adaptativos
             else:
                 todos_usuarios = db_listar_usuarios()
                 if not todos_usuarios:
                     return {
                         "verified": False,
                         "is_live": True,
-                        "reason": "Nenhum usuário cadastrado no sistema. Por favor, cadastre sua biometria primeiro.",
+                        "reason": "Nenhum usuário cadastrado no sistema. Por favor, crie sua conta primeiro.",
                         "status": "Nenhum usuário cadastrado."
                     }
 
-                maior_similaridade = -1.0
+                menor_distancia = 999.0
                 melhor_candidato = None
                 for u in todos_usuarios:
-                    sim = float(recognizer_sface.match(feat_probe, u["embedding"], cv2.FaceRecognizerSF_FR_COSINE))
-                    if sim > maior_similaridade:
-                        maior_similaridade = sim
+                    dist = calcular_distancia_usuario(feat_probe, u)
+                    if dist < menor_distancia:
+                        menor_distancia = dist
                         melhor_candidato = u
 
-                distance = max(0.0, 1.0 - maior_similaridade)
+                distance = menor_distancia
                 if distance <= threshold and melhor_candidato is not None:
                     verified = True
                     matched_user = melhor_candidato
+
+        # ======================================================================
+        # RETROALIMENTAÇÃO ADAPTATIVA: APRENDIZADO CONTÍNUO AO VIVO
+        # ======================================================================
+        adaptive_updated = False
+        current_samples_count = matched_user["samples_count"] if matched_user else 1
+
+        if verified and matched_user is not None:
+            # Salva o novo recorte facial alinhado deste login bem-sucedido
+            uid = matched_user["id"]
+            login_photo_filename = f"{uid}_latest.jpg"
+            login_photo_path = os.path.join(STORAGE_FACES_DIR, login_photo_filename)
+            cv2.imwrite(login_photo_path, aligned_probe)
+
+            # Adiciona amostra ao histórico e recalcula o centroide biométrico ponderado
+            current_samples_count = db_adicionar_amostra_login(
+                user_id=uid,
+                new_embedding=feat_probe,
+                latest_photo_filename=login_photo_filename,
+                distance_to_anchor=distance
+            )
+            adaptive_updated = True
 
         # 5. Geração de Token JWT assinado em caso de aprovação
         jwt_token = None
@@ -845,17 +1082,21 @@ async def verify_identity(
             "is_live": True,
             "distance": round(distance, 4),
             "matched_name": matched_user["name"] if matched_user else None,
+            "samples_count": current_samples_count,
+            "adaptive_updated": adaptive_updated,
             "reason": "Sucesso" if verified else "Rosto não reconhecido"
         })
 
         resp_user = {
             "id": matched_user["id"],
             "name": matched_user["name"],
-            "photo_url": f"/faces/{matched_user['photo_filename']}"
+            "samples_count": current_samples_count,
+            "photo_url": f"/faces/{matched_user['photo_filename']}",
+            "latest_photo_url": f"/faces/{matched_user.get('latest_photo_filename', matched_user['photo_filename'])}"
         } if matched_user else None
 
         msg_status = (
-            f"Olá {matched_user['name']}! Reconhecimento facial aprovado com sucesso!"
+            f"Olá {matched_user['name']}! Login biométrico aprovado! Perfil atualizado ({current_samples_count} amostras aprendidas)."
             if (verified and matched_user)
             else ("Reconhecimento facial aprovado com sucesso!" if verified else "Rosto não reconhecido ou biometria não confere.")
         )
@@ -865,6 +1106,8 @@ async def verify_identity(
             "is_live": True,
             "distance": round(distance, 4),
             "threshold": threshold,
+            "samples_count": current_samples_count,
+            "adaptive_updated": adaptive_updated,
             "jwt_token": jwt_token,
             "matched_user": resp_user,
             "status": msg_status
