@@ -2,7 +2,7 @@
   "expo": {
     "name": "Reconhecimento Fácil",
     "slug": "reconhecimento-facil",
-    "version": "1.1.0",
+    "version": "1.3.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -19,17 +19,30 @@
         {
           "brightnessPermission": "Permite ajustar o brilho durante o teste de prova de vida."
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "android": {
       "package": "com.abraao.reconhecimentofacil",
-      "versionCode": 2,
+      "versionCode": 9,
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#0F172A",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png"
       },
       "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET",
+        "android.permission.WRITE_SETTINGS",
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.INTERNET",
@@ -46,6 +59,12 @@
         "projectId": "a3ac5a95-b43a-4923-8cb2-74a459932ef0"
       }
     },
-    "owner": "abraao1098"
+    "owner": "abraao1098",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/a3ac5a95-b43a-4923-8cb2-74a459932ef0"
+    }
   }
 }

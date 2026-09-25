@@ -13,15 +13,21 @@ import {
   ScrollView,
   Switch,
 } from 'react-native';
-import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Brightness from 'expo-brightness';
 import * as Speech from 'expo-speech';
 import * as Haptics from 'expo-haptics';
-import axios from 'axios';
 import { StatusBar } from 'expo-status-bar';
+import * as Updates from 'expo-updates';
+import axios from 'axios';
 
-// Endereço IP padrão: Let's Encrypt HTTPS direto na VPS Oracle
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || 'https://132.226.242.158.sslip.io';
+// Servidor Oficial de Produção (VPS Oracle com SSL Let's Encrypt nativo):
+// https://api.abraao-dev.tech
+const CANDIDATE_SERVERS = [
+  'https://api.abraao-dev.tech',
+];
+
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL || CANDIDATE_SERVERS[0];
 
 type ScreenState = 'START' | 'LIVENESS' | 'PROCESSING' | 'SUCCESS' | 'REGISTER_SUCCESS' | 'FAILURE';
 type ActionMode = 'VERIFY' | 'REGISTER';
@@ -71,73 +77,106 @@ const triggerHapticFeedback = async (type: 'impact' | 'success' | 'error') => {
   }
 };
 
-// Resiliência de rede com Retry e Backoff Exponencial
-async function executeWithRetry<T>(
-  action: () => Promise<T>,
-  maxRetries: number = 3,
-  baseDelayMs: number = 1000,
-  onRetry?: (tentativa: number, total: number) => void
-): Promise<T> {
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      return await action();
-    } catch (error: any) {
-      attempt++;
-      if (attempt >= maxRetries) {
-        throw error;
+// Cliente HTTP inteligente com tentativas e timeout estendido (Wi-Fi e 4G/5G)
+async function fetchApi(
+  path: string,
+  preferredUrl: string,
+  options: RequestInit = {}
+): Promise<{ data: any; workingUrl: string }> {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const urlsToTry = Array.from(new Set([
+    preferredUrl.trim().replace(/\/+$/, ''),
+    ...CANDIDATE_SERVERS,
+  ]));
+
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    for (const base of urlsToTry) {
+      const fullUrl = `${base}${cleanPath}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const response = await fetch(fullUrl, {
+          ...options,
+          signal: controller.signal,
+          headers: {
+            Accept: 'application/json',
+            'Bypass-Tunnel-Reminder': 'true',
+            'cf-skip-browser-warning': 'true',
+            ...(options.headers || {}),
+          },
+        });
+        clearTimeout(timeout);
+        if (response.ok) {
+          const data = await response.json();
+          return { data, workingUrl: base };
+        }
+        const text = await response.text();
+        throw new Error(`Servidor retornou código ${response.status}: ${text}`);
+      } catch (err: any) {
+        clearTimeout(timeout);
+        lastError = err;
+        console.warn(`[API] Tentativa ${attempt} em ${base} falhou: ${err.message}`);
+        if (attempt === 1) {
+          await new Promise((r) => setTimeout(r, 400));
+        }
       }
-      if (onRetry) {
-        onRetry(attempt, maxRetries);
-      }
-      const delay = baseDelayMs * Math.pow(2, attempt - 1);
-      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
-  throw new Error('Falha na comunicação após múltiplas tentativas.');
+  throw lastError || new Error('Não foi possível conectar ao servidor.');
 }
 
-// Upload multipart confiável usando fetch nativo do React Native (sem conflito de boundary do OkHttp)
-async function postMultipartWithFetch(
-  url: string,
-  formData: FormData,
-  timeoutMs: number = 90000
-): Promise<any> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      body: formData,
-      headers: {
-        'Accept': 'application/json',
-        // Não defina Content-Type manualmente: o React Native e o OkHttp inserem
-        // 'multipart/form-data; boundary=...' automaticamente.
-      },
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let data: any = {};
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
+// Upload multipart resiliente com Axios para streaming confiável de vídeo (Wi-Fi e 4G/5G)
+async function uploadMultipart(
+  path: string,
+  createFormData: () => FormData,
+  preferredUrl: string,
+  timeoutMs: number = 60000
+): Promise<{ data: any; workingUrl: string }> {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const urlsToTry = Array.from(new Set([
+    preferredUrl.trim().replace(/\/+$/, ''),
+    ...CANDIDATE_SERVERS,
+  ]));
+
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    for (const base of urlsToTry) {
+      const fullUrl = `${base}${cleanPath}`;
+      try {
+        console.log(`[UPLOAD] Tentativa ${attempt}: POST ${fullUrl}...`);
+        const formData = createFormData();
+        const res = await axios.post(fullUrl, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+            'Bypass-Tunnel-Reminder': 'true',
+            'cf-skip-browser-warning': 'true',
+          },
+          timeout: timeoutMs,
+        });
+        console.log(`[UPLOAD] Resposta HTTP ${res.status} de ${base}`);
+        return { data: res.data, workingUrl: base };
+      } catch (err: any) {
+        console.warn(`[UPLOAD] Falha tentativa ${attempt} em ${base}: ${err.name} - ${err.message}`);
+        lastError = err;
+        const respData = err.response?.data;
+        if (respData) {
+          const msg = respData.detail || respData.reason || `Servidor retornou código ${err.response.status}`;
+          throw new Error(msg);
+        }
+        if (attempt === 1) {
+          await new Promise((r) => setTimeout(r, 600));
+        }
+      }
     }
-    if (!response.ok) {
-      const msg = data.detail || data.reason || `Servidor retornou código ${response.status}`;
-      throw new Error(msg);
-    }
-    return data;
-  } finally {
-    clearTimeout(timer);
   }
+  throw lastError || new Error('Falha na comunicação com o servidor após tentar o envio do vídeo.');
 }
 
 export default function App() {
   const [screenState, setScreenState] = useState<ScreenState>('START');
   const [actionMode, setActionMode] = useState<ActionMode>('VERIFY');
   const [permission, requestPermission] = useCameraPermissions();
-  const [micPermission, requestMicPermission] = useMicrophonePermissions();
 
   const [registerName, setRegisterName] = useState('');
   const [backgroundColor, setBackgroundColor] = useState('#000000');
@@ -156,8 +195,24 @@ export default function App() {
 
   // Configuração dinâmica de IP da API
   const [apiUrl, setApiUrl] = useState<string>(DEFAULT_API_URL);
+  const activeWorkingUrlRef = useRef<string>(DEFAULT_API_URL);
   const [showServerConfig, setShowServerConfig] = useState<boolean>(false);
   const [isTestingServer, setIsTestingServer] = useState<boolean>(false);
+
+  const updateWorkingUrl = (url: string) => {
+    activeWorkingUrlRef.current = url;
+    setApiUrl(url);
+  };
+
+  // Controle de Enquadramento e Início Automático do Liveness
+  const [isSequenceRunning, setIsSequenceRunning] = useState<boolean>(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [faceAligned, setFaceAligned] = useState<boolean>(false);
+  const [isCameraReady, setIsCameraReady] = useState<boolean>(false);
+
+  const countdownRef = useRef<number | null>(null);
+  const isSequenceRunningRef = useRef<boolean>(false);
+  const autoStartTimerRef = useRef<any>(null);
 
   const cameraRef = useRef<CameraView>(null);
 
@@ -166,23 +221,42 @@ export default function App() {
     if (!permission?.granted) {
       requestPermission();
     }
-    if (!micPermission?.granted) {
-      requestMicPermission();
-    }
-  }, [permission, micPermission]);
+  }, [permission]);
 
-  // Carrega lista de usuários da VPS ao iniciar
+  // Verificação e aplicação proativa de atualizações OTA (Over-The-Air)
+  useEffect(() => {
+    async function checkOtaUpdate() {
+      try {
+        if (!__DEV__) {
+          const update = await Updates.checkForUpdateAsync();
+          if (update.isAvailable) {
+            console.log('[UPDATES] Nova versão encontrada! Baixando...');
+            await Updates.fetchUpdateAsync();
+            console.log('[UPDATES] Reiniciando com a nova versão...');
+            await Updates.reloadAsync();
+          }
+        }
+      } catch (e) {
+        console.log('[UPDATES] Verificação OTA ignorada ou indisponível:', e);
+      }
+    }
+    checkOtaUpdate();
+  }, []);
+
+  // Carrega lista de usuários da VPS ao iniciar ou quando a URL mudar
   useEffect(() => {
     fetchRegisteredUsers();
   }, [apiUrl]);
 
   const fetchRegisteredUsers = async () => {
-    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     setLoadingUsers(true);
     try {
-      const res = await axios.get(`${cleanUrl}/users`, { timeout: 6000 });
-      if (res.data?.users) {
-        setRegisteredUsers(res.data.users);
+      const { data, workingUrl } = await fetchApi('/users', activeWorkingUrlRef.current);
+      if (data?.users) {
+        setRegisteredUsers(data.users);
+      }
+      if (workingUrl !== activeWorkingUrlRef.current) {
+        updateWorkingUrl(workingUrl);
       }
     } catch {
       // Falha silenciosa de sincronização inicial
@@ -201,9 +275,8 @@ export default function App() {
           text: 'Excluir',
           style: 'destructive',
           onPress: async () => {
-            const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
             try {
-              await axios.delete(`${cleanUrl}/users/${userId}`);
+              await fetchApi(`/users/${userId}`, activeWorkingUrlRef.current, { method: 'DELETE' });
               triggerHapticFeedback('impact');
               fetchRegisteredUsers();
             } catch (err: any) {
@@ -215,19 +288,18 @@ export default function App() {
     );
   };
 
-  // Testa conectividade com o backend
+  // Testa conectividade com o backend testando as rotas em fallback
   const handleTestConnection = async () => {
     setIsTestingServer(true);
-    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
-      const res = await axios.get(`${cleanUrl}/health`, {
-        timeout: 8000,
-        headers: { 'Bypass-Tunnel-Reminder': 'true' },
-      });
-      if (res.data?.status === 'ok') {
+      const { data, workingUrl } = await fetchApi('/health', apiUrl);
+      if (data?.status === 'ok') {
+        if (workingUrl !== activeWorkingUrlRef.current) {
+          updateWorkingUrl(workingUrl);
+        }
         Alert.alert(
           'Servidor Conectado! ✅',
-          `Servidor biométrico ativo na nuvem.\nModelo: ${res.data.model || 'YuNet-SFace'}\nVersão: ${res.data.version || '1.2.0'}`
+          `Conectado com sucesso!\nRota ativa: ${workingUrl}\nModelo: ${data.model || 'YuNet-SFace'}\nVersão: ${data.version || '1.3.0'}`
         );
         fetchRegisteredUsers();
       } else {
@@ -236,7 +308,7 @@ export default function App() {
     } catch (err: any) {
       Alert.alert(
         'Falha na Conexão ❌',
-        `Não foi possível conectar a:\n${cleanUrl}\n\nDetalhes: ${err.message || 'Sem resposta do servidor'}`
+        `Não foi possível conectar em nenhuma rota.\n\nDetalhes: ${err.message || 'Sem resposta do servidor'}`
       );
     } finally {
       setIsTestingServer(false);
@@ -246,6 +318,12 @@ export default function App() {
   // Iniciar Reconhecimento Facial ao Vivo
   const handleStartVerify = () => {
     setActionMode('VERIFY');
+    setIsCameraReady(false);
+    setFaceAligned(false);
+    setCountdown(null);
+    countdownRef.current = null;
+    setIsSequenceRunning(false);
+    isSequenceRunningRef.current = false;
     triggerHapticFeedback('impact');
     setScreenState('LIVENESS');
   };
@@ -258,81 +336,117 @@ export default function App() {
       return;
     }
     setActionMode('REGISTER');
+    setIsCameraReady(false);
+    setFaceAligned(false);
+    setCountdown(null);
+    countdownRef.current = null;
+    setIsSequenceRunning(false);
+    isSequenceRunningRef.current = false;
     triggerHapticFeedback('impact');
     setScreenState('LIVENESS');
   };
 
   // Sequência de Prova de Vida e Gravação da Câmera
   const runLivenessSequence = async () => {
-    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
     try {
       setStatusMessage('Sincronizando com o servidor...');
       speakInstruction('Aproxime o celular do rosto e olhe para a tela.', voiceAssistance);
 
-      // 1. Obtém desafio dinâmico da API com retry automático
-      const res = await executeWithRetry(
-        () => axios.get(`${cleanUrl}/challenge`, { timeout: 5000 }),
-        3,
-        1000,
-        (att, tot) => setStatusMessage(`Reconectando ao servidor (${att}/${tot})...`)
-      );
-      const { colors, flash_duration_ms } = res.data;
+      // 1. Obtém desafio dinâmico da API com fallback automático de rotas
+      console.log('[LIVENESS] Obtendo desafio do servidor...');
+      const { data: challengeData, workingUrl } = await fetchApi('/challenge', activeWorkingUrlRef.current);
+      if (workingUrl !== activeWorkingUrlRef.current) {
+        updateWorkingUrl(workingUrl);
+      }
+      const { colors, flash_duration_ms, session_token } = challengeData;
+      console.log(`[LIVENESS] Desafio recebido: cores=${colors}, token=${session_token}`);
 
       // 2. Eleva brilho da tela ao máximo para reflexo na pele
-      const { status } = await Brightness.requestPermissionsAsync();
+      // 2. Ajuste de brilho seguro (não interrompe o fluxo caso não haja permissão do sistema)
       let originalBrightness = 0.5;
-      if (status === 'granted') {
-        originalBrightness = await Brightness.getBrightnessAsync();
-        await Brightness.setBrightnessAsync(1.0);
+      try {
+        const bPerm = await Brightness.getPermissionsAsync();
+        if (bPerm.granted) {
+          originalBrightness = await Brightness.getBrightnessAsync();
+          await Brightness.setBrightnessAsync(1.0);
+        }
+      } catch (bErr) {
+        console.warn('[LIVENESS] Ajuste de brilho ignorado:', bErr);
       }
 
       setStatusMessage('Fique olhando para a tela...');
       triggerHapticFeedback('impact');
 
-      // 3. Inicia gravação de vídeo pela câmera frontal
-      const recordPromise = cameraRef.current?.recordAsync({ maxDuration: 4 });
+      // 3. Verifica se a câmera está pronta antes de gravar
+      if (!cameraRef.current) {
+        throw new Error('Câmera não está disponível. Volte e tente novamente.');
+      }
+
+      // 4. Inicia gravação de vídeo pela câmera frontal (resolução 480p leve para upload instantâneo no Wi-Fi)
+      console.log('[LIVENESS] Iniciando gravação de vídeo...');
+      const recordPromise = cameraRef.current.recordAsync({ maxDuration: 5 });
+
+      // Pequeno delay para garantir que a gravação iniciou de fato
+      await new Promise((r) => setTimeout(r, 200));
 
       // Frame inicial neutro escuro (300ms)
       setBackgroundColor('#000000');
       await new Promise((r) => setTimeout(r, 300));
 
-      // 4. Alterna as cores do desafio espectral
+      // 5. Alterna as cores do desafio espectral
       for (const color of colors) {
+        setStatusMessage(`Gravando reflexo: ${color}...`);
         setBackgroundColor(COLOR_MAP[color] || '#FFFFFF');
         triggerHapticFeedback('impact');
-        await new Promise((r) => setTimeout(r, flash_duration_ms ? Math.min(flash_duration_ms, 500) : 500));
+        await new Promise((r) => setTimeout(r, flash_duration_ms || 500));
       }
 
-      // 5. Finaliza gravação e restaura brilho
+      // 6. Finaliza gravação e restaura brilho
       setBackgroundColor('#000000');
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 400));
+      console.log('[LIVENESS] Parando gravação...');
       cameraRef.current?.stopRecording();
       const videoData = await recordPromise;
+      // Garante tempo para o sistema operacional finalizar a escrita do MP4 (moov atom)
+      await new Promise((r) => setTimeout(r, 400));
+      console.log(`[LIVENESS] Vídeo gravado: uri=${videoData?.uri || 'NULO'}`);
 
-      if (status === 'granted') {
+      try {
         await Brightness.setBrightnessAsync(originalBrightness);
-      }
+      } catch {}
 
-      // 6. Processa o vídeo de acordo com a ação (Verificar ou Cadastrar)
+      // 7. Valida o vídeo gravado
       setScreenState('PROCESSING');
 
       if (!videoData?.uri) {
-        throw new Error('Não foi possível capturar o vídeo da câmera.');
+        throw new Error('A câmera não conseguiu gravar o vídeo. Verifique as permissões da câmera e tente novamente.');
       }
 
+      // 8. Processa o vídeo de acordo com a ação (Verificar ou Cadastrar)
       if (actionMode === 'REGISTER') {
         setStatusMessage('Cadastrando biometria facial na nuvem (YuNet + SFace)...');
         speakInstruction('Salvando seus traços biométricos no servidor. Aguarde um instante.', voiceAssistance);
-        await sendRegistration(videoData.uri, registerName, colors);
+        await sendRegistration(videoData.uri, registerName, colors, session_token, workingUrl);
       } else {
         setStatusMessage('Reconhecendo traços faciais na nuvem (YuNet + SFace)...');
         speakInstruction('Analisando sua biometria facial. Só um momento.', voiceAssistance);
-        await sendVerification(videoData.uri, colors);
+        await sendVerification(videoData.uri, colors, session_token, workingUrl);
       }
+      setIsSequenceRunning(false);
+      isSequenceRunningRef.current = false;
+      setCountdown(null);
+      countdownRef.current = null;
     } catch (error: any) {
-      console.error(error);
+      console.error('[LIVENESS] Erro:', error.name, error.message);
+      setIsSequenceRunning(false);
+      isSequenceRunningRef.current = false;
+      setCountdown(null);
+      countdownRef.current = null;
       setBackgroundColor('#000000');
-      const errTxt = error.message || 'Falha ao conectar com o servidor.';
+      let errTxt = error.message || 'Falha ao conectar com o servidor.';
+      if (errTxt.includes('Network request failed') || errTxt.includes('Network Error') || errTxt.includes('timeout')) {
+        errTxt = 'Falha de comunicação com o servidor. Verifique a URL em ⚙️ Configurar ou tente novamente.';
+      }
       setErrorMessage(errTxt);
       setScreenState('FAILURE');
       triggerHapticFeedback('error');
@@ -340,38 +454,108 @@ export default function App() {
     }
   };
 
-  // Dispara automaticamente ao entrar na tela de Liveness
+  // Dispara a contagem regressiva e inicia a prova de vida automaticamente
+  const triggerAutomaticLiveness = () => {
+    if (isSequenceRunningRef.current || countdownRef.current !== null) return;
+
+    if (autoStartTimerRef.current) {
+      clearTimeout(autoStartTimerRef.current);
+      autoStartTimerRef.current = null;
+    }
+
+    setFaceAligned(true);
+    setStatusMessage('Rosto Pronto! ✅');
+    triggerHapticFeedback('impact');
+
+    setCountdown(3);
+    countdownRef.current = 3;
+    speakInstruction('Rosto identificado! Três...', voiceAssistance);
+
+    let count = 3;
+    const timer = setInterval(() => {
+      count -= 1;
+      if (count > 0) {
+        setCountdown(count);
+        countdownRef.current = count;
+        triggerHapticFeedback('impact');
+        if (count === 2) speakInstruction('Dois...', voiceAssistance);
+        if (count === 1) speakInstruction('Um... Olhe para a tela.', voiceAssistance);
+      } else {
+        clearInterval(timer);
+        setCountdown(null);
+        countdownRef.current = null;
+        setIsSequenceRunning(true);
+        isSequenceRunningRef.current = true;
+        runLivenessSequence();
+      }
+    }, 900);
+  };
+
+  // Ao entrar na tela de Liveness, aguarda o enquadramento consciente e inicia automaticamente após 2.2s
   useEffect(() => {
     if (screenState === 'LIVENESS') {
+      setIsSequenceRunning(false);
+      isSequenceRunningRef.current = false;
+      setCountdown(null);
+      countdownRef.current = null;
+      setFaceAligned(false);
       setStatusMessage('Posicione o rosto no círculo...');
-      const timer = setTimeout(() => {
-        runLivenessSequence();
-      }, 1500);
-      return () => clearTimeout(timer);
+      speakInstruction('Posicione o seu rosto no centro da tela e olhe para a câmera.', voiceAssistance);
+
+      // Início automático e suave: dá 2.2 segundos para a pessoa se posicionar
+      if (autoStartTimerRef.current) clearTimeout(autoStartTimerRef.current);
+      autoStartTimerRef.current = setTimeout(() => {
+        if (!isSequenceRunningRef.current && countdownRef.current === null) {
+          triggerAutomaticLiveness();
+        }
+      }, 2200);
+    } else {
+      if (autoStartTimerRef.current) {
+        clearTimeout(autoStartTimerRef.current);
+        autoStartTimerRef.current = null;
+      }
     }
+
+    return () => {
+      if (autoStartTimerRef.current) {
+        clearTimeout(autoStartTimerRef.current);
+        autoStartTimerRef.current = null;
+      }
+    };
   }, [screenState]);
 
-  // Envia vídeo para /register (Cadastro ao vivo)
-  const sendRegistration = async (videoUri: string, userName: string, colors: string[]) => {
-    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
+  // Envia vídeo para /register (Cadastro ao vivo com Fallback Automático)
+  const sendRegistration = async (
+    videoUri: string,
+    userName: string,
+    colors: string[],
+    sessionToken?: string,
+    verifiedUrl?: string
+  ) => {
     try {
-      const formData = new FormData();
-      formData.append('name', userName.trim());
-      formData.append('expected_colors', colors.join(','));
-      formData.append('video', {
-        uri: videoUri,
-        name: 'register_video.mp4',
-        type: 'video/mp4',
-      } as any);
-
       setStatusMessage('Enviando vídeo para o servidor...');
+      console.log(`[REGISTER] Preparando upload: videoUri=${videoUri}, user=${userName}`);
+      const createFd = () => {
+        const fd = new FormData();
+        fd.append('name', userName.trim());
+        fd.append('expected_colors', colors.join(','));
+        if (sessionToken) {
+          fd.append('session_token', sessionToken);
+        }
+        const cleanUri = videoUri.startsWith('file://') ? videoUri : `file://${videoUri}`;
+        fd.append('video', {
+          uri: cleanUri,
+          name: 'register_video.mp4',
+          type: 'video/mp4',
+        } as any);
+        return fd;
+      };
 
-      const data = await executeWithRetry(
-        () => postMultipartWithFetch(`${cleanUrl}/register`, formData, 90000),
-        2,
-        2000,
-        (att, tot) => setStatusMessage(`Reenviando vídeo para o servidor (${att}/${tot})...`)
-      );
+      const targetUrl = verifiedUrl || activeWorkingUrlRef.current;
+      const { data, workingUrl } = await uploadMultipart('/register', createFd, targetUrl);
+      if (workingUrl !== activeWorkingUrlRef.current) {
+        updateWorkingUrl(workingUrl);
+      }
 
       if (data.success) {
         setRegistrationData(data);
@@ -401,26 +585,36 @@ export default function App() {
     }
   };
 
-  // Envia vídeo para /verify (Reconhecimento ao vivo)
-  const sendVerification = async (videoUri: string, colors: string[]) => {
-    const cleanUrl = apiUrl.trim().replace(/\/+$/, '');
+  // Envia vídeo para /verify (Reconhecimento ao vivo com Fallback Automático)
+  const sendVerification = async (
+    videoUri: string,
+    colors: string[],
+    sessionToken?: string,
+    verifiedUrl?: string
+  ) => {
     try {
-      const formData = new FormData();
-      formData.append('expected_colors', colors.join(','));
-      formData.append('video', {
-        uri: videoUri,
-        name: 'challenge_video.mp4',
-        type: 'video/mp4',
-      } as any);
-
       setStatusMessage('Enviando vídeo para reconhecimento...');
+      console.log(`[VERIFY] Preparando upload: videoUri=${videoUri}`);
+      const createFd = () => {
+        const fd = new FormData();
+        fd.append('expected_colors', colors.join(','));
+        if (sessionToken) {
+          fd.append('session_token', sessionToken);
+        }
+        const cleanUri = videoUri.startsWith('file://') ? videoUri : `file://${videoUri}`;
+        fd.append('video', {
+          uri: cleanUri,
+          name: 'challenge_video.mp4',
+          type: 'video/mp4',
+        } as any);
+        return fd;
+      };
 
-      const data = await executeWithRetry(
-        () => postMultipartWithFetch(`${cleanUrl}/verify`, formData, 90000),
-        2,
-        2000,
-        (att, tot) => setStatusMessage(`Reenviando vídeo para o servidor (${att}/${tot})...`)
-      );
+      const targetUrl = verifiedUrl || activeWorkingUrlRef.current;
+      const { data, workingUrl } = await uploadMultipart('/verify', createFd, targetUrl);
+      if (workingUrl !== activeWorkingUrlRef.current) {
+        updateWorkingUrl(workingUrl);
+      }
 
       setVerificationData(data);
 
@@ -457,10 +651,19 @@ export default function App() {
   // Reinicia para a tela inicial
   const resetToStart = () => {
     Speech.stop();
+    if (autoStartTimerRef.current) {
+      clearTimeout(autoStartTimerRef.current);
+      autoStartTimerRef.current = null;
+    }
     setVerificationData(null);
     setRegistrationData(null);
     setErrorMessage('');
     setBackgroundColor('#000000');
+    setCountdown(null);
+    countdownRef.current = null;
+    setIsSequenceRunning(false);
+    isSequenceRunningRef.current = false;
+    setFaceAligned(false);
     setScreenState('START');
   };
 
@@ -613,8 +816,8 @@ export default function App() {
                 <TextInput
                   style={styles.serverInput}
                   value={apiUrl}
-                  onChangeText={setApiUrl}
-                  placeholder="https://132.226.242.158.sslip.io"
+                  onChangeText={updateWorkingUrl}
+                  placeholder="https://api.abraao-dev.tech"
                   placeholderTextColor="#64748B"
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -623,28 +826,28 @@ export default function App() {
                 <Text style={styles.presetsLabel}>Atalhos Rápidos de Conexão:</Text>
                 <View style={styles.presetsContainer}>
                   <TouchableOpacity
+                    style={[styles.presetButton, apiUrl.includes('abraao-dev.tech') && styles.presetButtonActive]}
+                    onPress={() => updateWorkingUrl('https://api.abraao-dev.tech')}
+                  >
+                    <Text style={styles.presetButtonText}>⚡ Domínio Oficial (api.abraao-dev.tech - Wi-Fi/4G)</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.presetButton, apiUrl.includes('trycloudflare.com') && styles.presetButtonActive]}
+                    onPress={() => updateWorkingUrl('https://coated-meals-retained-ward.trycloudflare.com')}
+                  >
+                    <Text style={styles.presetButtonText}>🛡️ Túnel Cloudflare</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
                     style={[styles.presetButton, apiUrl.includes('sslip.io') && styles.presetButtonActive]}
-                    onPress={() => setApiUrl('https://132.226.242.158.sslip.io')}
+                    onPress={() => updateWorkingUrl('https://132.226.242.158.sslip.io')}
                   >
-                    <Text style={styles.presetButtonText}>🔒 VPS HTTPS Oficial (sslip.io)</Text>
+                    <Text style={styles.presetButtonText}>🔒 VPS Direto HTTPS (sslip.io)</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={styles.presetButton}
-                    onPress={() => setApiUrl('http://132.226.242.158')}
+                    style={[styles.presetButton, apiUrl === 'http://132.226.242.158' && styles.presetButtonActive]}
+                    onPress={() => updateWorkingUrl('http://132.226.242.158')}
                   >
-                    <Text style={styles.presetButtonText}>🌐 VPS Porta 80</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.presetButton}
-                    onPress={() => setApiUrl('http://132.226.242.158:8000')}
-                  >
-                    <Text style={styles.presetButtonText}>🔌 VPS Porta 8000</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.presetButton}
-                    onPress={() => setApiUrl('http://192.168.1.44:8000')}
-                  >
-                    <Text style={styles.presetButtonText}>💻 Wi-Fi Local (192.168.1.44)</Text>
+                    <Text style={styles.presetButtonText}>🌐 VPS Porta 80 (HTTP)</Text>
                   </TouchableOpacity>
                 </View>
 
@@ -691,35 +894,103 @@ export default function App() {
   // RENDERIZAÇÃO: TELA 2 - CÂMERA & PROVA DE VIDA
   // ==========================================
   if (screenState === 'LIVENESS') {
+    const borderColor = isSequenceRunning
+      ? '#FFFFFF'
+      : countdown !== null || faceAligned
+      ? '#10B981'
+      : '#38BDF8';
+
     return (
       <SafeAreaView style={[styles.livenessContainer, { backgroundColor }]}>
         <StatusBar style="light" />
-        <Text style={styles.livenessStatusText}>{statusMessage}</Text>
 
-        <View style={styles.ovalMask}>
+        {/* Cabeçalho de Status e Orientação */}
+        <View style={styles.livenessHeader}>
+          <Text style={styles.livenessStatusText}>
+            {countdown !== null
+              ? `Iniciando em ${countdown}...`
+              : statusMessage}
+          </Text>
+          {!isSequenceRunning && countdown === null && (
+            <Text style={styles.livenessSubtitle}>
+              Ajuste a distância até o seu rosto preencher o círculo
+            </Text>
+          )}
+        </View>
+
+        {/* Moldura Oval da Câmera com feedback visual e toque interativo */}
+        <TouchableOpacity
+          activeOpacity={0.96}
+          onPress={triggerAutomaticLiveness}
+          style={[styles.ovalMask, { borderColor }]}
+        >
           <CameraView
             ref={cameraRef}
             style={styles.cameraView}
             facing="front"
             mode="video"
+            videoQuality="480p"
+            videoBitrate={1_200_000}
+            onCameraReady={() => setIsCameraReady(true)}
             mute={true}
           />
+          {/* Flash colorido ativo durante o teste */}
           {backgroundColor !== '#000000' && (
             <View
               style={[
                 StyleSheet.absoluteFillObject,
-                { backgroundColor, opacity: 0.38 },
+                { backgroundColor, opacity: 0.85 },
               ]}
               pointerEvents="none"
             />
           )}
-        </View>
 
-        <Text style={styles.livenessTip}>
-          {actionMode === 'REGISTER'
-            ? 'Olhe para a moldura para cadastrar seu rosto'
-            : 'Mantenha o rosto parado na moldura'}
-        </Text>
+          {/* Contagem regressiva sobreposta no centro do círculo */}
+          {countdown !== null && (
+            <View style={styles.countdownOverlay} pointerEvents="none">
+              <Text style={styles.countdownNumber}>{countdown}</Text>
+              <Text style={styles.countdownTip}>Olhe para a tela</Text>
+            </View>
+          )}
+
+          {/* Retículo guia de enquadramento quando aguardando */}
+          {!isSequenceRunning && countdown === null && (
+            <View style={styles.reticleOverlay} pointerEvents="none">
+              <View style={[styles.reticleLineH, { backgroundColor: borderColor }]} />
+              <View style={[styles.reticleLineV, { backgroundColor: borderColor }]} />
+            </View>
+          )}
+        </TouchableOpacity>
+
+        {/* Rodapé da Câmera: Indicador Automático e Cancelar */}
+        {!isSequenceRunning && countdown === null ? (
+          <View style={styles.livenessActions}>
+            <View style={styles.autoTimerBadge}>
+              <ActivityIndicator
+                size="small"
+                color="#38BDF8"
+                style={{ marginRight: 8 }}
+              />
+              <Text style={styles.autoTimerBadgeText}>
+                Início automático em instantes...
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.cancelLivenessButton}
+              onPress={resetToStart}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.cancelLivenessButtonText}>✕ Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <Text style={styles.livenessTip}>
+            {actionMode === 'REGISTER'
+              ? 'Mantenha o rosto na moldura gravando...'
+              : 'Mantenha o rosto parado na moldura...'}
+          </Text>
+        )}
       </SafeAreaView>
     );
   }
@@ -1178,15 +1449,24 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 30,
+    paddingVertical: 24,
+  },
+  livenessHeader: {
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    marginTop: 10,
   },
   livenessStatusText: {
     fontSize: 22,
     fontWeight: 'bold',
     color: '#FFFFFF',
     textAlign: 'center',
-    paddingHorizontal: 20,
-    marginTop: 20,
+  },
+  livenessSubtitle: {
+    fontSize: 14,
+    color: '#94A3B8',
+    textAlign: 'center',
+    marginTop: 6,
   },
   ovalMask: {
     width: width * 0.74,
@@ -1194,11 +1474,109 @@ const styles = StyleSheet.create({
     borderRadius: (width * 0.74) / 2,
     overflow: 'hidden',
     borderWidth: 4,
-    borderColor: '#FFFFFF',
+    borderColor: '#38BDF8',
     backgroundColor: '#000000',
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   cameraView: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
+  },
+  countdownOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  countdownNumber: {
+    fontSize: 84,
+    fontWeight: '900',
+    color: '#10B981',
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
+  },
+  countdownTip: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    marginTop: 8,
+    letterSpacing: 0.5,
+  },
+  reticleOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    opacity: 0.45,
+  },
+  reticleLineH: {
+    width: 36,
+    height: 2,
+    borderRadius: 1,
+    position: 'absolute',
+  },
+  reticleLineV: {
+    width: 2,
+    height: 36,
+    borderRadius: 1,
+    position: 'absolute',
+  },
+  livenessActions: {
+    width: '100%',
+    paddingHorizontal: 24,
+    alignItems: 'center',
+  },
+  startLivenessButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0284C7',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 16,
+    width: '100%',
+    shadowColor: '#0284C7',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  startLivenessButtonIcon: {
+    fontSize: 22,
+    marginRight: 10,
+    color: '#FFFFFF',
+  },
+  startLivenessButtonText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  autoTimerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(30, 41, 59, 0.75)',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    marginTop: 10,
+  },
+  autoTimerBadgeText: {
+    color: '#94A3B8',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  cancelLivenessButton: {
+    paddingVertical: 12,
+    marginTop: 8,
+    alignItems: 'center',
+  },
+  cancelLivenessButtonText: {
+    color: '#94A3B8',
+    fontSize: 15,
+    fontWeight: '600',
   },
   livenessTip: {
     color: '#E2E8F0',

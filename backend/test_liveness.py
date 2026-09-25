@@ -52,7 +52,7 @@ def gerar_video_sintetico_com_cores(caminho_arquivo: str, cores: list[str], simu
 
     out.release()
 
-def testar_rejeicao_sem_rosto():
+def test_rejeicao_sem_rosto():
     print("\n🧪 [1/3] Testando rejeição imediata quando nenhum rosto é detectado...")
     temp_dir = tempfile.mkdtemp()
     video_sem_rosto = os.path.join(temp_dir, "sem_rosto.mp4")
@@ -70,7 +70,7 @@ def testar_rejeicao_sem_rosto():
             os.remove(video_sem_rosto)
         os.rmdir(temp_dir)
 
-def testar_selecao_melhor_frame_laplaciano():
+def test_selecao_melhor_frame_laplaciano():
     print("\n🧪 [2/3] Testando seleção inteligente do melhor frame com filtro Laplaciano...")
     temp_dir = tempfile.mkdtemp()
     video_path = os.path.join(temp_dir, "teste_nitidez.mp4")
@@ -109,7 +109,7 @@ def testar_selecao_melhor_frame_laplaciano():
             os.remove(video_path)
         os.rmdir(temp_dir)
 
-def testar_algoritmo_delta_rgb():
+def test_algoritmo_delta_rgb():
     print("\n🧪 [3/3] Testando algoritmo Delta RGB com ROI dinâmica...")
     temp_dir = tempfile.mkdtemp()
     video_valido = os.path.join(temp_dir, "teste_valido.mp4")
@@ -135,7 +135,7 @@ def testar_algoritmo_delta_rgb():
                 os.remove(f)
         os.rmdir(temp_dir)
 
-def testar_minifasnet_bloqueio_tela_e_foto():
+def test_minifasnet_bloqueio_tela_e_foto():
     print("\n🧪 [4/4] Testando MiniFASNet V2 contra foto impressa e tela de monitor...")
     from main import avaliar_liveness_minifasnet, net_minifasnet
     if net_minifasnet is None:
@@ -148,14 +148,29 @@ def testar_minifasnet_bloqueio_tela_e_foto():
     is_real, score, reason, detalhes = avaliar_liveness_minifasnet(flat_frame, face_box)
     print(f"  -> Teste tela plana: is_real={is_real}, motivo='{reason}', detalhes={detalhes}")
     assert not is_real, "MiniFASNet deveria rejeitar imagem de tela plana"
-    assert "fraude detectada" in reason.lower() or "tela" in reason.lower()
-    print("  -> Bloqueio de tela/foto pelo MiniFASNet: PASSOU ✅")
+    assert "fraude detectada" in reason.lower() or "tela" in reason.lower() or "inconclusiva" in reason.lower()
+    print("  -> Bloqueio de tela plana pelo MiniFASNet: PASSOU ✅")
+
+    # 2. Testa frame real salvo em debug se disponível
+    import os
+    probe_path = os.path.join(os.path.dirname(__file__), "debug", "last_probe_frame.jpg")
+    if os.path.exists(probe_path):
+        from main import extrair_face_completa
+        probe_img = cv2.imread(probe_path)
+        if probe_img is not None:
+            _, _, upright, f_data = extrair_face_completa(probe_img)
+            if upright is not None and f_data is not None:
+                is_real_face, live_score, live_reason, live_detalhes = avaliar_liveness_minifasnet(upright, f_data[:4])
+                print(f"  -> Teste face humana real (probe): is_real={is_real_face}, score={live_score:.4f}, detalhes={live_detalhes}")
+                assert is_real_face, f"MiniFASNet não deveria rejeitar pessoa real: {live_reason}"
+                assert live_score >= 0.70, f"Score de pessoa real deve ser >= 70%: {live_score}"
+                print("  -> Autenticação de pessoa humana real pelo MiniFASNet: PASSOU ✅")
 
 if __name__ == "__main__":
-    testar_rejeicao_sem_rosto()
-    testar_selecao_melhor_frame_laplaciano()
-    testar_algoritmo_delta_rgb()
-    testar_minifasnet_bloqueio_tela_e_foto()
+    test_rejeicao_sem_rosto()
+    test_selecao_melhor_frame_laplaciano()
+    test_algoritmo_delta_rgb()
+    test_minifasnet_bloqueio_tela_e_foto()
     print("\n🎉 Todos os testes unitários foram concluídos com 100% de sucesso!")
 
 

@@ -25,7 +25,7 @@ from main import (
     calcular_distancia_usuario
 )
 
-def testar_fluxo_biometria_adaptativa():
+def test_fluxo_biometria_adaptativa():
     print("\n🧠 [Adaptativo 1/4] Testando cadastro sem comparação e criação da âncora inicial...")
 
     import time
@@ -129,4 +129,4 @@ def testar_fluxo_biometria_adaptativa():
             pass
 
 if __name__ == "__main__":
-    testar_fluxo_biometria_adaptativa()
+    test_fluxo_biometria_adaptativa()

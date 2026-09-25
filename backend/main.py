@@ -15,17 +15,21 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+APP_VERSION = "1.3.0"
 
 app = FastAPI(
     title="Reconhecimento Fácil - Microsserviço de Biometria & Prova de Vida",
     description="Microsserviço independente anti-spoofing com flash espectral de cores, YuNet, SFace, JWT e Rate Limiting",
-    version="1.2.0"
+    version=APP_VERSION
 )
 
 # Habilita CORS para permitir chamadas diretas do React Native no celular
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,10 +43,17 @@ CORES_DISPONIVEIS = ["VERMELHO", "AZUL", "VERDE"]
 VERIFY_ATTEMPTS: dict[str, list[float]] = {}
 MAX_ATTEMPTS_PER_MINUTE = 5
 RATE_LIMIT_WINDOW_SECONDS = 60
+PENDING_CHALLENGES: dict[str, tuple[list[str], float]] = {}  # token -> (colors, created_timestamp)
+CHALLENGE_TTL_SECONDS = 120  # Desafios expiram em 2 minutos
 
 def aplicar_rate_limit(client_ip: str):
     """Bloqueia tentativas consecutivas automatizadas por força bruta."""
     now = time.time()
+    # Limpeza periódica de IPs obsoletos (a cada chamada, custo amortizado O(1))
+    if len(VERIFY_ATTEMPTS) > 1000:
+        stale_ips = [ip for ip, ts in VERIFY_ATTEMPTS.items() if not ts or now - ts[-1] > RATE_LIMIT_WINDOW_SECONDS]
+        for ip in stale_ips:
+            VERIFY_ATTEMPTS.pop(ip, None)
     timestamps = VERIFY_ATTEMPTS.get(client_ip, [])
     # Filtra apenas tentativas dentro da janela recente
     timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW_SECONDS]
@@ -57,7 +68,15 @@ def aplicar_rate_limit(client_ip: str):
 # ==============================================================================
 # SEGURANÇA: EMISSÃO DE TOKEN JWT ASSINADO (HS256)
 # ==============================================================================
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "reconhecimento_facil_secret_key_2026")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
+if not JWT_SECRET_KEY:
+    import warnings
+    warnings.warn(
+        "SEGURANÇA: JWT_SECRET_KEY não definida! Usando chave efêmera. "
+        "Defina a variável de ambiente JWT_SECRET_KEY em produção.",
+        stacklevel=1
+    )
+    JWT_SECRET_KEY = base64.urlsafe_b64encode(os.urandom(32)).decode()
 
 def base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
@@ -125,6 +144,27 @@ def registrar_auditoria(entry: dict):
     AUDIT_LOGS.append(entry)
     if len(AUDIT_LOGS) > MAX_AUDIT_LOGS:
         AUDIT_LOGS.pop(0)
+    # Persistência em SQLite para sobreviver a reinícios
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO audit_logs (timestamp, client_ip, user_id, action, verified, is_live, reason, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            entry.get("timestamp"),
+            entry.get("client_ip"),
+            entry.get("user_id"),
+            entry.get("action"),
+            str(entry.get("verified", "")),
+            str(entry.get("is_live", "")),
+            entry.get("reason", entry.get("fraud_detected", "")),
+            json.dumps({k: v for k, v in entry.items() if k not in ("timestamp", "client_ip", "user_id", "action", "verified", "is_live", "reason")})
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"WARN: Falha ao persistir log de auditoria no SQLite: {e}")
 
 @app.get("/")
 def root():
@@ -148,7 +188,7 @@ def health_check():
         "anti_spoofing": "MiniFASNetV2" if minifasnet_ok else "disabled",
         "yunet": yunet_ok,
         "sface": sface_ok,
-        "version": "1.3.0"
+        "version": APP_VERSION
     }
 
 @app.get("/challenge")
@@ -159,10 +199,16 @@ def get_challenge():
     """
     cores_sorteadas = random.sample(CORES_DISPONIVEIS, 3)
     token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+    # Limpa desafios expirados
+    now = time.time()
+    expired = [t for t, (_, ts) in PENDING_CHALLENGES.items() if now - ts > CHALLENGE_TTL_SECONDS]
+    for t in expired:
+        del PENDING_CHALLENGES[t]
+    PENDING_CHALLENGES[token] = (cores_sorteadas, now)
     return {
         "session_token": token,
         "colors": cores_sorteadas,
-        "flash_duration_ms": 750
+        "flash_duration_ms": 500
     }
 
 @app.get("/verify/token/validate")
@@ -239,6 +285,21 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            client_ip TEXT,
+            user_id TEXT,
+            action TEXT,
+            verified TEXT,
+            is_live TEXT,
+            reason TEXT,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.commit()
     conn.close()
 
@@ -504,6 +565,103 @@ def extrair_embedding_e_recorte(frame: np.ndarray) -> tuple[Optional[np.ndarray]
     feat, aligned, _, _ = extrair_face_completa(frame)
     return feat, aligned
 
+class DetectFacePayload(BaseModel):
+    image_base64: Optional[str] = None
+    image: Optional[str] = None
+
+@app.post("/detect_face")
+async def detect_face_presence(
+    request: Request,
+    payload: Optional[DetectFacePayload] = None,
+    photo: Optional[UploadFile] = File(None)
+):
+    """
+    Verifica rapidamente (< 30ms) se há um rosto humano enquadrado e centralizado na câmera.
+    Permite que o aplicativo móvel aguarde o usuário posicionar o rosto antes de disparar
+    a sequência de flashes e gravação biométrica.
+    """
+    img = None
+    try:
+        if photo is not None:
+            contents = await photo.read()
+            nparr = np.frombuffer(contents, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        elif payload and (payload.image_base64 or payload.image):
+            b64 = payload.image_base64 or payload.image
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            img_bytes = base64.b64decode(b64)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        else:
+            try:
+                raw_json = await request.json()
+                b64 = raw_json.get("image_base64") or raw_json.get("image")
+                if b64:
+                    if "," in b64:
+                        b64 = b64.split(",", 1)[1]
+                    img_bytes = base64.b64decode(b64)
+                    nparr = np.frombuffer(img_bytes, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception:
+                pass
+
+        if img is None:
+            return {"detected": False, "centered": False, "message": "Nenhuma imagem válida recebida"}
+
+        face_data = None
+        frame_final = img
+        for rot in [None, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180]:
+            cand = cv2.rotate(img, rot) if rot is not None else img
+            f_cand = detectar_face_yunet(cand)
+            if f_cand is not None:
+                face_data = f_cand
+                frame_final = cand
+                break
+
+        if face_data is None:
+            return {
+                "detected": False,
+                "centered": False,
+                "message": "Nenhum rosto identificado no círculo. Aproxime-se da câmera."
+            }
+
+        x, y, w, h = face_data[:4]
+        img_h, img_w = frame_final.shape[:2]
+
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        norm_cx = cx / max(1.0, float(img_w))
+        norm_cy = cy / max(1.0, float(img_h))
+        ratio_w = w / max(1.0, float(img_w))
+        ratio_h = h / max(1.0, float(img_h))
+
+        if ratio_w < 0.10 or ratio_h < 0.10:
+            return {
+                "detected": True,
+                "centered": False,
+                "message": "Aproxime um pouco mais o celular do rosto.",
+                "confidence": round(float(face_data[-1]), 3)
+            }
+
+        is_centered = (0.18 <= norm_cx <= 0.82) and (0.12 <= norm_cy <= 0.88)
+        if not is_centered:
+            return {
+                "detected": True,
+                "centered": False,
+                "message": "Centralize seu rosto no círculo.",
+                "confidence": round(float(face_data[-1]), 3)
+            }
+
+        return {
+            "detected": True,
+            "centered": True,
+            "message": "Rosto enquadrado perfeitamente!",
+            "confidence": round(float(face_data[-1]), 3)
+        }
+    except Exception as e:
+        return {"detected": False, "centered": False, "error": str(e), "message": "Erro ao analisar imagem"}
+
 class MiniFASNetCropper:
     """Implementação oficial do gerador de patches para MiniFASNet (Minivision AI)."""
     @staticmethod
@@ -541,7 +699,15 @@ class MiniFASNetCropper:
             left_top_y -= right_bottom_y - src_h + 1
             right_bottom_y = src_h - 1
 
-        return int(left_top_x), int(left_top_y), int(right_bottom_x), int(right_bottom_y)
+        left_top_x = max(0, min(src_w - 1, int(left_top_x)))
+        left_top_y = max(0, min(src_h - 1, int(left_top_y)))
+        right_bottom_x = max(0, min(src_w - 1, int(right_bottom_x)))
+        right_bottom_y = max(0, min(src_h - 1, int(right_bottom_y)))
+
+        if right_bottom_x <= left_top_x or right_bottom_y <= left_top_y:
+            return 0, 0, src_w - 1, src_h - 1
+
+        return left_top_x, left_top_y, right_bottom_x, right_bottom_y
 
     @classmethod
     def crop(cls, org_img: np.ndarray, bbox, scale: float = 2.7, out_w: int = 80, out_h: int = 80):
@@ -555,7 +721,7 @@ class MiniFASNetCropper:
 def avaliar_liveness_minifasnet(
     frame: np.ndarray,
     face_box,
-    min_live_score: float = 0.80
+    min_live_score: float = 0.70
 ) -> tuple[bool, float, str, dict]:
     """
     Avalia a prova de vida passiva utilizando a rede neural profunda MiniFASNet V2.
@@ -563,13 +729,18 @@ def avaliar_liveness_minifasnet(
       - Classe 0: Print Attack (foto impressa em papel)
       - Classe 1: Genuine Live (pele humana real ao vivo)
       - Classe 2: Screen Replay Attack (tela de monitor, celular, tablet)
+    
+    Nota de calibração: MiniFASNet opera com valores brutos no intervalo [0, 255] float32 em RGB.
+    Normalização por 1/255 reduzia a imagem a valores próximos de zero, simulando tela escura
+    e gerando falsos positivos de tela (prob_screen > 99%) em rostos humanos reais.
     """
     if net_minifasnet is None or frame is None or face_box is None:
         return True, 1.0, "MiniFASNet desativado ou indisponível.", {"status": "skipped"}
 
     try:
         crop_img = MiniFASNetCropper.crop(frame, face_box, scale=2.7, out_w=80, out_h=80)
-        blob = cv2.dnn.blobFromImage(crop_img, scalefactor=1.0 / 255.0, size=(80, 80), swapRB=False)
+        # MiniFASNet espera imagem RGB com canais no intervalo 0..255 (float32)
+        blob = cv2.dnn.blobFromImage(crop_img, scalefactor=1.0, size=(80, 80), swapRB=True)
         net_minifasnet.setInput(blob)
         logits = net_minifasnet.forward()[0]
 
@@ -588,13 +759,15 @@ def avaliar_liveness_minifasnet(
             "predicted_label": pred_label
         }
 
-        if pred_label == 2:
+        # Bloqueio categórico se for detectado replay em tela com alta probabilidade
+        if pred_label == 2 and prob_screen >= 0.70:
             pct = prob_screen * 100
             return False, prob_live, f"Tentativa de fraude detectada: apresentação em tela/monitor de computador ({pct:.1f}%).", detalhes
-        elif pred_label == 0:
+        elif pred_label == 0 and prob_print >= 0.70:
             pct = prob_print * 100
             return False, prob_live, f"Tentativa de fraude detectada: foto impressa em papel identificada ({pct:.1f}%).", detalhes
 
+        # Para aprovação como pessoa viva ao vivo, exige probabilidade de vivacidade acima do limiar
         if prob_live < min_live_score:
             pct = prob_live * 100
             return False, prob_live, f"Prova de vida inconclusiva (Score de autenticidade: {pct:.1f}% < {min_live_score * 100:.0f}%).", detalhes
@@ -908,7 +1081,8 @@ async def register_biometrics(
     video: UploadFile = File(...),
     name: str = Form(...),
     user_id: Optional[str] = Form(None),
-    expected_colors: Optional[str] = Form(None)
+    expected_colors: Optional[str] = Form(None),
+    session_token: Optional[str] = Form(None)
 ):
     """
     Cadastra a biometria facial de um novo usuário DIRETAMENTE AO VIVO via vídeo gravado da câmera.
@@ -926,6 +1100,31 @@ async def register_biometrics(
 
     uid = user_id.strip() if user_id and user_id.strip() else f"user_{int(time.time())}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
 
+    # Validação do session_token e cores para prova de vida
+    cores = None
+    if session_token and session_token.strip():
+        challenge_data = PENDING_CHALLENGES.pop(session_token.strip(), None)
+        if challenge_data is None:
+            return {
+                "success": False,
+                "verified": False,
+                "is_live": False,
+                "reason": "Token de sessão inválido ou expirado. Solicite um novo desafio.",
+                "status": "Token de sessão inválido."
+            }
+        challenge_colors, challenge_ts = challenge_data
+        if time.time() - challenge_ts > CHALLENGE_TTL_SECONDS:
+            return {
+                "success": False,
+                "verified": False,
+                "is_live": False,
+                "reason": "Desafio expirado. Solicite um novo desafio.",
+                "status": "Desafio expirado."
+            }
+        cores = challenge_colors  # Usa as cores oficiais vinculadas ao challenge
+    elif expected_colors and expected_colors.strip():
+        cores = [c.strip() for c in expected_colors.split(",") if c.strip()]
+
     temp_dir = tempfile.mkdtemp()
     video_path = os.path.join(temp_dir, "register_video.mp4")
 
@@ -934,8 +1133,7 @@ async def register_biometrics(
             shutil.copyfileobj(video.file, f)
 
         face_roi = None
-        if expected_colors and expected_colors.strip():
-            cores = [c.strip() for c in expected_colors.split(",") if c.strip()]
+        if cores:
             is_live, liveness_msg, face_roi = validar_reflexo_delta_rgb(video_path, cores)
             if not is_live:
                 return {
@@ -959,7 +1157,7 @@ async def register_biometrics(
             }
 
         # Validação Anti-Spoofing profunda com MiniFASNet V2 (bloqueio categórico de telas de PC e fotos impressas)
-        is_real, fas_score, fas_reason, fas_detalhes = avaliar_liveness_minifasnet(upright_frame, face_data[:4], min_live_score=0.80)
+        is_real, fas_score, fas_reason, fas_detalhes = avaliar_liveness_minifasnet(upright_frame, face_data[:4], min_live_score=0.70)
         if not is_real:
             registrar_auditoria({
                 "client_ip": client_ip,
@@ -1049,6 +1247,9 @@ def get_face_photo(filename: str):
     """Serve a foto facial salva no banco de dados biométrico."""
     safe_name = os.path.basename(filename)
     file_path = os.path.join(STORAGE_FACES_DIR, safe_name)
+    resolved = os.path.realpath(file_path)
+    if not resolved.startswith(os.path.realpath(STORAGE_FACES_DIR)):
+        raise HTTPException(status_code=403, detail="Acesso negado.")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Foto biométrica não encontrada.")
     return FileResponse(file_path, media_type="image/jpeg")
@@ -1082,7 +1283,8 @@ async def verify_identity(
     video: UploadFile = File(...),
     expected_colors: str = Form(...), # Ex: "VERMELHO,AZUL,VERDE"
     profile_photo: Optional[UploadFile] = File(None),
-    user_id: Optional[str] = Form(None)
+    user_id: Optional[str] = Form(None),
+    session_token: Optional[str] = Form(None)
 ):
     """
     Verificação biométrica ao vivo contra o banco de dados (1:N ou 1:1) ou foto de perfil.
@@ -1092,6 +1294,26 @@ async def verify_identity(
     aplicar_rate_limit(client_ip)
 
     cores = [c.strip() for c in expected_colors.split(",") if c.strip()]
+    # Validação do session_token (se fornecido)
+    if session_token and session_token.strip():
+        challenge_data = PENDING_CHALLENGES.pop(session_token.strip(), None)
+        if challenge_data is None:
+            return {
+                "verified": False,
+                "is_live": False,
+                "reason": "Token de sessão inválido ou expirado. Solicite um novo desafio.",
+                "status": "Token de sessão inválido."
+            }
+        challenge_colors, challenge_ts = challenge_data
+        if time.time() - challenge_ts > CHALLENGE_TTL_SECONDS:
+            return {
+                "verified": False,
+                "is_live": False,
+                "reason": "Desafio expirado. Solicite um novo desafio.",
+                "status": "Desafio expirado."
+            }
+        cores = challenge_colors  # Usa as cores oficiais do challenge
+
     temp_dir = tempfile.mkdtemp()
 
     video_path = os.path.join(temp_dir, "challenge_video.mp4")
@@ -1138,7 +1360,7 @@ async def verify_identity(
             }
 
         # Validação Anti-Spoofing profunda com MiniFASNet V2 (bloqueio categórico de telas de PC e fotos impressas)
-        is_real, fas_score, fas_reason, fas_detalhes = avaliar_liveness_minifasnet(upright_probe, face_data_probe[:4], min_live_score=0.80)
+        is_real, fas_score, fas_reason, fas_detalhes = avaliar_liveness_minifasnet(upright_probe, face_data_probe[:4], min_live_score=0.70)
         if not is_real:
             registrar_auditoria({
                 "client_ip": client_ip,
