@@ -97,14 +97,14 @@ O serviço estará disponível em `http://localhost:8000`.
 
 ---
 
-### 2️⃣ Subindo o App Mobile (React Native / Expo SDK 54)
+### 2️⃣ Subindo o App Mobile (Exemplo React Native / Expo)
 
 Na raiz do repositório:
 
 ```bash
 cd mobile
 
-# Instale as dependências (atenção à flag para compatibilidade de dependências peer)
+# Instale as dependências
 npm install --legacy-peer-deps
 
 # Inicie o servidor Metro
@@ -114,69 +114,10 @@ npx expo start -c
 1. Um **QR Code** será exibido no terminal.
 2. Abra o aplicativo **Expo Go** no seu celular Android ou iOS.
 3. Aponte a câmera para ler o QR Code.
-4. O app abrirá conectado ao backend configurado.
+4. Pronto! O app abrirá no celular conectado ao backend.
 
-> [!tip] Configuração Dinâmica da URL do Servidor
-> Por padrão, o app consulta uma lista de servidores candidatos definida em `CANDIDATE_SERVERS` no topo de `mobile/App.tsx`. Você pode apontar para qualquer IP ou domínio tocando no ícone de engrenagem ⚙️ **"Configurar IP do Servidor"** diretamente na tela inicial do app.
-
----
-
-## 🛠️ Guia de Implantação e Operação para Equipes
-
-Para que a solução funcione com estabilidade máxima em **redes externas, 4G/5G e Wi-Fi residencial**, a equipe deve observar os seguintes pontos arquiteturais:
-
-### 1. Requisitos de Rede e Proxy Reverso (Evitando o Erro "Network Request Failed")
-Ambientes de produção e redes móveis/Wi-Fi possuem particularidades que foram resolvidas nesta versão:
-
-* **HTTPS Obrigatório:** No Android 9+ e iOS, conexões HTTP puras em texto claro são bloqueadas pelo sistema operacional. Em produção, use sempre HTTPS válido (Let's Encrypt ou Cloudflare).
-* **Timeout de NAT em Roteadores Residenciais (`Connection: close`):** Roteadores Wi-Fi domésticos costumam derrubar o mapeamento NAT de conexões TCP ociosas após 5 segundos. Como o app faz um `GET /users` ao abrir e o usuário leva alguns segundos para clicar em "Reconhecer", o socket ficava ocioso e caía.
-  * **Solução:** No Nginx da sua VPS / Reverse Proxy, configure:
-    ```nginx
-    keepalive_timeout 0;
-    ```
-    Isso força o envio do cabeçalho `Connection: close`, garantindo que cada requisição abra um socket TCP limpo e nunca congele no Wi-Fi.
-* **Túnel Cloudflare Anycast (Opção Recomendada para Bypass de CGNAT):**
-  Se o servidor estiver atrás de CGNAT ou firewall restritivo, execute um túnel Cloudflare gratuito:
-  ```bash
-  cloudflared tunnel --url http://localhost:8000
-  ```
-  Isso roteia o tráfego pela rede Anycast da Cloudflare com terminação TLS ultrarrápida.
-* **MTU e MSS Clamping:** Para evitar perda de pacotes em conexões de fibra doméstica (PPPoE), certifique-se de ativar o MSS Clamping no firewall da VPS:
-  ```bash
-  sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-  ```
-
----
-
-### 2. Arquitetura Mobile de Alta Resiliência (`mobile/App.tsx`)
-O aplicativo mobile foi otimizado para eliminar qualquer gargalo de conectividade:
-
-* **Axios com Timeout Resiliente:** Substituiu o `fetch()` nativo do React Native, eliminando vazamento de sinais de abort no pool de conexões do OkHttp.
-* **Prefetch de Desafio em Background:** Ao clicar em "Reconhecer" ou "Cadastrar", o app requisita `GET /challenge` em segundo plano durante a contagem regressiva visual (3, 2, 1). Quando a contagem zera, as cores do desafio e o token de sessão já estão na memória, iniciando o flash de tela com latência zero.
-* **Gravação Balanceada (480p a 1.2 Mbps):** O vídeo é gravado em resolução 480p a 1.2 Mbps por 3 segundos (~500 KB), garantindo upload ultrarrápido mesmo em redes móveis com sinal fraco.
-* **Brilho Seguro:** O ajuste temporário para brilho máximo (para reflexo espectral ideal) é encapsulado com tratamento de exceção seguro, não travando em aparelhos com restrição de permissão de sistema.
-
----
-
-### 3. Geração de APK e Atualizações Remotas (EAS Build & Update)
-
-Para compilar ou distribuir novas versões sem passar pelas lojas:
-
-```bash
-cd mobile
-
-# 1. Login no Expo Application Services
-npx eas-cli login
-
-# 2. Compilar APK Standalone Android (perfil preview)
-npx eas-cli build -p android --profile preview
-
-# 3. Publicar Atualização Remota Over-The-Air (OTA) instantânea
-npx eas-cli update --channel preview --message "Melhoria de estabilidade"
-```
-
-> [!important] Regra de Compatibilidade OTA
-> Para que uma atualização OTA via `eas update` seja aplicada no app do usuário, a propriedade `runtimeVersion` em `mobile/app.json` deve corresponder exatamente ao valor configurado na compilação do APK instalado (ex: `"1.3.5"`).
+> [!tip] Conexão com o IP do Computador
+> Por padrão, o app aponta para o IP local da sua máquina na porta `8000` (ex: `http://192.168.1.44:8000`). Você pode alterar o IP a qualquer momento tocando na engrenagem **"Configurar IP do Servidor"** na tela inicial do app.
 
 ---
 
